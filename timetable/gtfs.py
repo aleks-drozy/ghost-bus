@@ -51,6 +51,20 @@ def local_from_service(service_date: dt.date, seconds: int, tz: str) -> dt.datet
     return (base_utc + dt.timedelta(seconds=seconds)).astimezone(zone)
 
 
+_INSERT_BATCH = 50_000  # stream inserts: a full national stop_times list OOMs a 1 GB VM
+
+
+def _insert_stream(db: sqlite3.Connection, sql: str, tuples) -> None:
+    batch = []
+    for row in tuples:
+        batch.append(row)
+        if len(batch) >= _INSERT_BATCH:
+            db.executemany(sql, batch)
+            batch.clear()
+    if batch:
+        db.executemany(sql, batch)
+
+
 def load_gtfs(zip_path: str | Path, db: sqlite3.Connection) -> str:
     digest = hashlib.sha256(Path(zip_path).read_bytes()).hexdigest()
     db.executescript(_SCHEMA)
@@ -64,24 +78,24 @@ def load_gtfs(zip_path: str | Path, db: sqlite3.Connection) -> str:
         db.execute("DELETE FROM gtfs_calendar_dates")
         db.execute("DELETE FROM gtfs_routes")
         db.execute("DELETE FROM gtfs_agency")
-        db.executemany("INSERT INTO gtfs_trips VALUES (?,?,?)",
-                       [(r["trip_id"], r["route_id"], r["service_id"]) for r in rows("trips.txt")])
-        db.executemany("INSERT INTO gtfs_routes VALUES (?,?)",
-                       [(r["route_id"], r["agency_id"]) for r in rows("routes.txt")])
-        db.executemany("INSERT INTO gtfs_agency VALUES (?,?)",
-                       [(r["agency_id"], r["agency_name"]) for r in rows("agency.txt")])
-        db.executemany("INSERT INTO gtfs_stop_times VALUES (?,?,?)",
-                       [(r["trip_id"], int(r["stop_sequence"]), gtfs_seconds(r["departure_time"]))
-                        for r in rows("stop_times.txt")])
-        db.executemany("INSERT INTO gtfs_calendar VALUES (?,?,?,?,?,?,?,?,?,?)",
-                       [(r["service_id"], *[int(r[d]) for d in
+        _insert_stream(db, "INSERT INTO gtfs_trips VALUES (?,?,?)",
+                       ((r["trip_id"], r["route_id"], r["service_id"]) for r in rows("trips.txt")))
+        _insert_stream(db, "INSERT INTO gtfs_routes VALUES (?,?)",
+                       ((r["route_id"], r["agency_id"]) for r in rows("routes.txt")))
+        _insert_stream(db, "INSERT INTO gtfs_agency VALUES (?,?)",
+                       ((r["agency_id"], r["agency_name"]) for r in rows("agency.txt")))
+        _insert_stream(db, "INSERT INTO gtfs_stop_times VALUES (?,?,?)",
+                       ((r["trip_id"], int(r["stop_sequence"]), gtfs_seconds(r["departure_time"]))
+                        for r in rows("stop_times.txt")))
+        _insert_stream(db, "INSERT INTO gtfs_calendar VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       ((r["service_id"], *[int(r[d]) for d in
                          ("monday", "tuesday", "wednesday", "thursday", "friday",
                           "saturday", "sunday")], r["start_date"], r["end_date"])
-                        for r in rows("calendar.txt")])
+                        for r in rows("calendar.txt")))
         if "calendar_dates.txt" in zf.namelist():
-            db.executemany("INSERT INTO gtfs_calendar_dates VALUES (?,?,?)",
-                           [(r["service_id"], r["date"], int(r["exception_type"]))
-                            for r in rows("calendar_dates.txt")])
+            _insert_stream(db, "INSERT INTO gtfs_calendar_dates VALUES (?,?,?)",
+                           ((r["service_id"], r["date"], int(r["exception_type"]))
+                            for r in rows("calendar_dates.txt")))
     db.execute("INSERT OR REPLACE INTO gtfs_meta VALUES ('gtfs_hash', ?)", (digest,))
     db.commit()
     return digest

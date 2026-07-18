@@ -36,14 +36,19 @@ def classify_trip(db: sqlite3.Connection, trip: ScheduledTrip) -> str:
     tracked = [(ts, seq) for ts, kind, seq in rows if kind in ("position", "update")]
     if not tracked:
         return "UNTRACKED"
-    last_ts = dt.datetime.fromisoformat(max(ts for ts, _ in tracked))
+    # Parse before comparing - string order breaks if timestamp formats ever vary.
+    last_ts = max(dt.datetime.fromisoformat(ts) for ts, _ in tracked)
     seqs = [seq for _, seq in tracked if seq is not None]
-    progress = (max(seqs) / trip.n_stops) if seqs else 0.0
+    # GTFS stop_sequence need not be contiguous, so the denominator is the trip's
+    # own max scheduled sequence, clamped defensively.
+    progress = min(1.0, max(seqs) / trip.max_stop_seq) if seqs else 0.0
     if progress >= 0.90 or last_ts >= trip.end_utc - dt.timedelta(minutes=10):
         return "COMPLETED"
     if progress < 0.75 and last_ts < trip.end_utc - dt.timedelta(minutes=15):
         return "VANISHED"
-    return "COMPLETED"  # 75-90% progress ending late-window: benefit of the doubt
+    # Residual: neither clearly completed nor vanished (incl. any-progress trips last
+    # seen 10-15 min before scheduled end) - benefit of the doubt goes to the operator.
+    return "COMPLETED"
 
 
 def classify_day(db: sqlite3.Connection, trips: list[ScheduledTrip],

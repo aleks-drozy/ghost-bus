@@ -69,6 +69,7 @@ def test_scheduled_trips_weekday(db):
     assert t0.window_start_utc == t0.start_utc - dt.timedelta(minutes=5)
     assert t0.window_end_utc == t0.end_utc + dt.timedelta(minutes=15)
     assert t0.n_stops == 5
+    assert t0.max_stop_seq == 5
 
 
 def test_scheduled_trips_saturday(db):

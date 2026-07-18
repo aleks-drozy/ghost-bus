@@ -43,12 +43,20 @@ def test_noon_rule_past_midnight_lands_next_day():
 
 
 def test_noon_rule_dst_spring_forward():
-    # Sat service 2026-03-28: its 24:30 trip runs during the 2026-03-29 01:00 spring-forward.
-    # Noon-minus-12h rule: base = 2026-03-28 12:00 IST-boundary-safe; 24:30 = base+12.5h
-    # -> 2026-03-29 01:30 local DOES NOT EXIST (clocks jump 01:00->02:00), rule yields 02:30 IST.
+    # EU spring-forward: 2026-03-29 01:00Z (01:00 GMT -> 02:00 IST).
+    # "24:30:00" on service day 2026-03-28 = 24.5 elapsed hours after
+    # 2026-03-28 00:00Z -> 2026-03-29 00:30Z, BEFORE the jump -> 00:30 GMT.
     local = local_from_service(dt.date(2026, 3, 28), gtfs_seconds("24:30:00"), "Europe/Dublin")
-    assert local.utcoffset() == dt.timedelta(hours=1)  # IST after the jump
-    assert local.astimezone(UTC).hour == 1 and local.astimezone(UTC).minute == 30
+    assert local.utcoffset() == dt.timedelta(0)
+    assert local.astimezone(UTC) == dt.datetime(2026, 3, 29, 0, 30, tzinfo=UTC)
+
+
+def test_noon_rule_crosses_spring_forward_gap():
+    # "25:30:00" = 25.5 elapsed hours -> 2026-03-29 01:30Z, AFTER the jump -> 02:30 IST.
+    local = local_from_service(dt.date(2026, 3, 28), gtfs_seconds("25:30:00"), "Europe/Dublin")
+    assert local.utcoffset() == dt.timedelta(hours=1)
+    assert local.hour == 2 and local.minute == 30
+    assert local.astimezone(UTC) == dt.datetime(2026, 3, 29, 1, 30, tzinfo=UTC)
 
 
 def test_scheduled_trips_weekday(db):

@@ -34,28 +34,17 @@ def gtfs_seconds(hms: str) -> int:
 
 
 def local_from_service(service_date: dt.date, seconds: int, tz: str) -> dt.datetime:
+    """GTFS time = real ELAPSED seconds after (service-day noon local - 12 h).
+
+    Arithmetic happens in UTC: aware-datetime arithmetic within one tzinfo is
+    wall-clock in Python, which is not what GTFS specifies - doing it in UTC
+    makes spring-forward gaps and fall-back folds impossible to hit.
+    """
     zone = ZoneInfo(tz)
-    # Compute naive local time: service date noon minus 12h plus seconds
-    naive_start = dt.datetime(service_date.year, service_date.month, service_date.day, 12, 0)
-    naive_result = naive_start - dt.timedelta(hours=12) + dt.timedelta(seconds=seconds)
-
-    # Create aware datetime
-    result_local = naive_result.replace(tzinfo=zone, fold=0)
-    current_offset = result_local.utcoffset()
-
-    # Check for spring-forward DST transitions by looking ahead incrementally
-    check_time = result_local
-    for _ in range(25):  # Check up to 24 hours ahead
-        next_check = check_time + dt.timedelta(hours=1)
-        if next_check.utcoffset() > current_offset:
-            # Found a spring-forward! Add the offset delta
-            offset_delta = next_check.utcoffset() - current_offset
-            result_utc = result_local.astimezone(UTC) + offset_delta
-            result_local = result_utc.astimezone(zone)
-            break
-        check_time = next_check
-
-    return result_local
+    noon = dt.datetime(service_date.year, service_date.month, service_date.day,
+                       12, 0, tzinfo=zone)
+    base_utc = noon.astimezone(UTC) - dt.timedelta(hours=12)
+    return (base_utc + dt.timedelta(seconds=seconds)).astimezone(zone)
 
 
 def load_gtfs(zip_path: str | Path, db: sqlite3.Connection) -> str:

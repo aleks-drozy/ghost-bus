@@ -37,7 +37,10 @@ def uptime(db: sqlite3.Connection, start_utc: dt.datetime, end_utc: dt.datetime)
     if window_s <= 0:
         return 0.0
     expected = math.ceil(window_s / 60.0)
+    # Distinct minute buckets, not raw heartbeat rows - a crash-loop or sub-minute
+    # retry storm must not inflate uptime by counting the same minute repeatedly.
     (got,) = db.execute(
-        "SELECT COUNT(*) FROM heartbeats WHERE ok=1 AND ts_utc>=? AND ts_utc<?",
+        "SELECT COUNT(DISTINCT substr(ts_utc,1,16)) FROM heartbeats "
+        "WHERE ok=1 AND ts_utc>=? AND ts_utc<?",
         (start_utc.isoformat(), end_utc.isoformat())).fetchone()
     return min(1.0, got / expected)

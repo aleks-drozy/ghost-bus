@@ -33,7 +33,16 @@ def check_outcomes_valid(db: sqlite3.Connection) -> dict:
 
 def main() -> int:
     db = sqlite3.connect(sys.argv[1] if len(sys.argv) > 1 else "state/ghostbus.db")
-    results = [check_conservation(db), check_rates_bounded(db), check_outcomes_valid(db)]
+    # Outcomes validity gates the other two checks: conservation and rates_bounded
+    # both key into per-outcome dict slots (see aggregate/rollup.py), so an
+    # unrecognized outcome string would KeyError there instead of failing cleanly.
+    outcomes_result = check_outcomes_valid(db)
+    if not outcomes_result["passed"]:
+        print("FAIL", outcomes_result["check"])
+        print("SKIP conservation (invalid outcomes present)")
+        print("SKIP rates_bounded (invalid outcomes present)")
+        return 1
+    results = [check_conservation(db), check_rates_bounded(db), outcomes_result]
     for r in results:
         print(("PASS" if r["passed"] else "FAIL"), r["check"])
     return 0 if all(r["passed"] for r in results) else 1

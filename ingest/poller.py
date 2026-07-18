@@ -24,6 +24,11 @@ def _service_date(start_date: str) -> str:
 def parse_feed(raw: bytes) -> list[dict]:
     feed = rt.FeedMessage()
     feed.ParseFromString(raw)
+    if not feed.header.gtfs_realtime_version:
+        # ParseFromString does not raise on arbitrary bytes that happen to be valid
+        # (empty) protobuf - a missing version is our signal this was never really
+        # a GTFS-Realtime feed (e.g. an HTML error page from a gateway).
+        raise ValueError("invalid feed")
     out: list[dict] = []
     for entity in feed.entity:
         if entity.HasField("trip_update"):
@@ -51,11 +56,17 @@ def poll_once(db: sqlite3.Connection, fetch_fn: Callable[[], bytes],
     """Fetch and ingest one batch of GTFS-Realtime observations.
 
     route_filter is reserved; observations are not filtered at ingest - route scoping
-    happens at classify time via the timetable join.
+    happens at classify time via the timetable join. A poll only counts as
+    successful (ok=True heartbeat, archived snapshot) once the fetch AND the parse
+    both succeed - an unparseable response (e.g. a gateway error page) is a failed
+    poll, not a zero-observation success. Observations whose start_date doesn't
+    parse to 8 digits are dropped: an unmatchable service key is never mis-keyed
+    as "" and silently orphaned from every scheduled trip instead.
     """
     now = now_fn()
     try:
         raw = fetch_fn()
+        parsed = parse_feed(raw)
     except Exception:
         record_heartbeat(db, now.isoformat(), False)
         return -1
@@ -66,8 +77,10 @@ def poll_once(db: sqlite3.Connection, fetch_fn: Callable[[], bytes],
         (day_dir / f"{now.strftime('%H%M%S')}.pb.zst").write_bytes(
             zstandard.ZstdCompressor().compress(raw))
     count = 0
-    for obs in parse_feed(raw):
+    for obs in parsed:
         if not obs["trip_id"]:
+            continue
+        if len(obs["start_date"]) != 8 or not obs["start_date"].isdigit():
             continue
         record_observation(db, obs["trip_id"], _service_date(obs["start_date"]),
                            now.isoformat(), obs["kind"], obs["stop_sequence"])

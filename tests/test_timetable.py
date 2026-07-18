@@ -1,6 +1,5 @@
 import datetime as dt
 import sqlite3
-import zoneinfo
 
 import pytest
 

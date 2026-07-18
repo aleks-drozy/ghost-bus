@@ -1,0 +1,15 @@
+[Unit]
+Description=Ghost Bus GTFS-R poller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/ghost-bus
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/ghostbus.env
+ExecStart=/opt/ghost-bus/.venv/bin/python -m ingest.run_poller
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

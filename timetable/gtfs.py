@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS gtfs_calendar (
   friday INT, saturday INT, sunday INT, start_date TEXT, end_date TEXT);
 CREATE TABLE IF NOT EXISTS gtfs_calendar_dates (
   service_id TEXT, date TEXT, exception_type INTEGER);
+CREATE TABLE IF NOT EXISTS gtfs_routes (route_id TEXT PRIMARY KEY, agency_id TEXT);
+CREATE TABLE IF NOT EXISTS gtfs_agency (agency_id TEXT PRIMARY KEY, agency_name TEXT);
 CREATE TABLE IF NOT EXISTS gtfs_meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE INDEX IF NOT EXISTS idx_stop_times_trip ON gtfs_stop_times(trip_id);
 """
@@ -60,8 +62,14 @@ def load_gtfs(zip_path: str | Path, db: sqlite3.Connection) -> str:
         db.execute("DELETE FROM gtfs_trips"); db.execute("DELETE FROM gtfs_stop_times")
         db.execute("DELETE FROM gtfs_calendar")
         db.execute("DELETE FROM gtfs_calendar_dates")
+        db.execute("DELETE FROM gtfs_routes")
+        db.execute("DELETE FROM gtfs_agency")
         db.executemany("INSERT INTO gtfs_trips VALUES (?,?,?)",
                        [(r["trip_id"], r["route_id"], r["service_id"]) for r in rows("trips.txt")])
+        db.executemany("INSERT INTO gtfs_routes VALUES (?,?)",
+                       [(r["route_id"], r["agency_id"]) for r in rows("routes.txt")])
+        db.executemany("INSERT INTO gtfs_agency VALUES (?,?)",
+                       [(r["agency_id"], r["agency_name"]) for r in rows("agency.txt")])
         db.executemany("INSERT INTO gtfs_stop_times VALUES (?,?,?)",
                        [(r["trip_id"], int(r["stop_sequence"]), gtfs_seconds(r["departure_time"]))
                         for r in rows("stop_times.txt")])
@@ -96,7 +104,8 @@ _WEEKDAY_COLS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturd
 
 
 def scheduled_trips(db: sqlite3.Connection, service_date: dt.date,
-                    tz: str = "Europe/Dublin") -> list[ScheduledTrip]:
+                    tz: str = "Europe/Dublin", *,
+                    agency_names: set[str] | None = None) -> list[ScheduledTrip]:
     datestr = service_date.strftime("%Y%m%d")
     col = _WEEKDAY_COLS[service_date.weekday()]
     services = {sid for (sid,) in db.execute(
@@ -114,11 +123,25 @@ def scheduled_trips(db: sqlite3.Connection, service_date: dt.date,
             services.discard(sid)
     if not services:
         return []
+    if agency_names is not None and not agency_names:
+        return []
     out: list[ScheduledTrip] = []
     marks = ",".join("?" * len(services))
-    for trip_id, route_id in db.execute(
-            f"SELECT trip_id, route_id FROM gtfs_trips WHERE service_id IN ({marks})",
-            tuple(services)):
+    if agency_names is None:
+        query = f"SELECT trip_id, route_id FROM gtfs_trips WHERE service_id IN ({marks})"
+        params: tuple = tuple(services)
+    else:
+        # Scope to agency_names via trips -> routes -> agency; unmatched names
+        # simply yield no rows rather than erroring.
+        agency_marks = ",".join("?" * len(agency_names))
+        query = (
+            "SELECT t.trip_id, t.route_id FROM gtfs_trips t "
+            "JOIN gtfs_routes r ON r.route_id = t.route_id "
+            "JOIN gtfs_agency a ON a.agency_id = r.agency_id "
+            f"WHERE t.service_id IN ({marks}) AND a.agency_name IN ({agency_marks})"
+        )
+        params = tuple(services) + tuple(agency_names)
+    for trip_id, route_id in db.execute(query, params):
         row = db.execute(
             "SELECT MIN(dep_seconds), MAX(dep_seconds), COUNT(*), MAX(stop_sequence) "
             "FROM gtfs_stop_times WHERE trip_id=?",

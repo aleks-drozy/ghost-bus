@@ -27,7 +27,14 @@ def test_load_stores_hash_and_counts(db):
     (h,) = db.execute("SELECT value FROM gtfs_meta WHERE key='gtfs_hash'").fetchone()
     assert len(h) == 64
     (n_trips,) = db.execute("SELECT COUNT(*) FROM gtfs_trips").fetchone()
-    assert n_trips == 17  # 11 R1 + 5 R2 wk + 1 R2 sat
+    assert n_trips == 19  # 11 R1 + 5 R2 wk + 1 R2 sat + 2 R3 wk
+
+
+def test_load_stores_agency_and_routes(db):
+    agencies = dict(db.execute("SELECT agency_id, agency_name FROM gtfs_agency"))
+    assert agencies == {"FVB": "Fixtureville Bus", "GAI": "Go-Ahead Fixtureville"}
+    routes = dict(db.execute("SELECT route_id, agency_id FROM gtfs_routes"))
+    assert routes == {"R1": "FVB", "R2": "FVB", "R3": "GAI"}
 
 
 def test_noon_rule_regular_day():
@@ -62,7 +69,8 @@ def test_scheduled_trips_weekday(db):
     trips = scheduled_trips(db, dt.date(2026, 3, 23))
     ids = {t.trip_id for t in trips}
     assert "R1_wk_00" in ids and "R1_late" in ids and "R2_sat_00" not in ids
-    assert len(trips) == 16
+    assert "R3_wk_00" in ids and "R3_wk_01" in ids
+    assert len(trips) == 18  # 11 R1 + 5 R2 wk + 2 R3 wk
     t0 = next(t for t in trips if t.trip_id == "R1_wk_00")
     assert t0.start_utc == dt.datetime(2026, 3, 23, 7, 0, tzinfo=UTC)  # GMT day
     assert t0.window_start_utc == t0.start_utc - dt.timedelta(minutes=5)
@@ -84,3 +92,19 @@ def test_calendar_dates_exceptions(db):
     # 2026-04-01 is a Wednesday: WK removed (bank holiday), SAT added.
     trips = scheduled_trips(db, dt.date(2026, 4, 1))
     assert {t.trip_id for t in trips} == {"R2_sat_00"}
+
+
+def test_scheduled_trips_agency_filter_excludes_other_agency(db):
+    trips = scheduled_trips(db, dt.date(2026, 3, 23), agency_names={"Fixtureville Bus"})
+    ids = {t.trip_id for t in trips}
+    assert "R3_wk_00" not in ids and "R3_wk_01" not in ids
+    assert len(trips) == 16  # 11 R1 + 5 R2 wk, R3 (GAI) excluded
+
+
+def test_scheduled_trips_agency_filter_none_returns_all(db):
+    trips = scheduled_trips(db, dt.date(2026, 3, 23), agency_names=None)
+    assert len(trips) == 18
+
+
+def test_scheduled_trips_agency_filter_unknown_name_returns_empty(db):
+    assert scheduled_trips(db, dt.date(2026, 3, 23), agency_names={"Nonexistent Co"}) == []

@@ -30,13 +30,17 @@ def _trip_rows(trip_id: str, start_s: int, duration_s: int, stops: list[str]):
 
 def build_gtfs_zip(path: str | Path) -> None:
     agency = [{"agency_id": "FVB", "agency_name": "Fixtureville Bus",
+               "agency_url": "https://example.invalid", "agency_timezone": FIXTURE_TZ},
+              {"agency_id": "GAI", "agency_name": "Go-Ahead Fixtureville",
                "agency_url": "https://example.invalid", "agency_timezone": FIXTURE_TZ}]
     stops = [{"stop_id": s, "stop_name": f"Stop {s}", "stop_lat": "53.3", "stop_lon": "-6.2"}
              for s in sorted(set(_STOPS_R1 + _STOPS_R2))]
     routes = [{"route_id": "R1", "agency_id": "FVB", "route_short_name": "1",
                "route_long_name": "Fixtureville Main", "route_type": "3"},
               {"route_id": "R2", "agency_id": "FVB", "route_short_name": "2",
-               "route_long_name": "Fixtureville Orbital", "route_type": "3"}]
+               "route_long_name": "Fixtureville Orbital", "route_type": "3"},
+              {"route_id": "R3", "agency_id": "GAI", "route_short_name": "3",
+               "route_long_name": "Fixtureville Crosstown", "route_type": "3"}]
     calendar = [
         {"service_id": "WK", "monday": "1", "tuesday": "1", "wednesday": "1",
          "thursday": "1", "friday": "1", "saturday": "0", "sunday": "0",
@@ -61,6 +65,8 @@ def build_gtfs_zip(path: str | Path) -> None:
     for i in range(5):  # from 08:15, 45-minute run
         add_trip(f"R2_wk_{i:02d}", "R2", "WK", 8 * 3600 + 900 + i * 3600, 2700, _STOPS_R2)
     add_trip("R2_sat_00", "R2", "SAT", 9 * 3600, 2700, _STOPS_R2)
+    add_trip("R3_wk_00", "R3", "WK", 10 * 3600, 2700, _STOPS_R1)  # 10:00, 45-minute run, GAI agency
+    add_trip("R3_wk_01", "R3", "WK", 11 * 3600, 2700, _STOPS_R1)  # 11:00, 45-minute run, GAI agency
 
     tables = {"agency.txt": agency, "stops.txt": stops, "routes.txt": routes,
               "trips.txt": trips, "stop_times.txt": stop_times, "calendar.txt": calendar,

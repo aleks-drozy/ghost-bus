@@ -45,6 +45,10 @@ def build_gtfs_zip(path: str | Path) -> None:
          "thursday": "0", "friday": "0", "saturday": "1", "sunday": "0",
          "start_date": "20260323", "end_date": "20260410"},
     ]
+    calendar_dates = [
+        {"service_id": "WK", "date": "20260401", "exception_type": "2"},  # removed weekday - fixture bank holiday
+        {"service_id": "SAT", "date": "20260401", "exception_type": "1"},  # Sunday-style service added that Wednesday
+    ]
     trips, stop_times = [], []
 
     def add_trip(trip_id, route_id, service_id, start_s, duration_s, stop_list):
@@ -59,7 +63,8 @@ def build_gtfs_zip(path: str | Path) -> None:
     add_trip("R2_sat_00", "R2", "SAT", 9 * 3600, 2700, _STOPS_R2)
 
     tables = {"agency.txt": agency, "stops.txt": stops, "routes.txt": routes,
-              "trips.txt": trips, "stop_times.txt": stop_times, "calendar.txt": calendar}
+              "trips.txt": trips, "stop_times.txt": stop_times, "calendar.txt": calendar,
+              "calendar_dates.txt": calendar_dates}
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, rows in tables.items():
             buf = io.StringIO()

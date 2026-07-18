@@ -82,6 +82,18 @@ def test_untracked_when_no_signal(db):
     assert classify_trip(db, trip) == "UNTRACKED"
 
 
+def test_predictions_alone_do_not_count_as_tracking(db):
+    # A trip with only TripUpdate predictions (kind='update') and no vehicle
+    # positions is UNTRACKED: predictions are what the app shows for a ghost.
+    trip = make_trip()
+    beat_window(db, trip)
+    record_observation(db, trip.trip_id, str(DAY),
+                       (trip.start_utc + dt.timedelta(minutes=10)).isoformat(), "update", 5)
+    record_observation(db, trip.trip_id, str(DAY),
+                       (trip.end_utc - dt.timedelta(minutes=5)).isoformat(), "update", 5)
+    assert classify_trip(db, trip) == "UNTRACKED"
+
+
 def test_every_trip_gets_exactly_one_outcome(db):
     trips = [make_trip(f"T{i}", start_h=7 + i % 3) for i in range(12)]
     for i, t in enumerate(trips):

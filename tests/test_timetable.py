@@ -79,3 +79,9 @@ def test_scheduled_trips_saturday(db):
 
 def test_out_of_range_date_is_empty(db):
     assert scheduled_trips(db, dt.date(2026, 5, 1)) == []
+
+
+def test_calendar_dates_exceptions(db):
+    # 2026-04-01 is a Wednesday: WK removed (bank holiday), SAT added.
+    trips = scheduled_trips(db, dt.date(2026, 4, 1))
+    assert {t.trip_id for t in trips} == {"R2_sat_00"}

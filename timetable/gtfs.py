@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS gtfs_stop_times (trip_id TEXT, stop_sequence INTEGER,
 CREATE TABLE IF NOT EXISTS gtfs_calendar (
   service_id TEXT PRIMARY KEY, monday INT, tuesday INT, wednesday INT, thursday INT,
   friday INT, saturday INT, sunday INT, start_date TEXT, end_date TEXT);
+CREATE TABLE IF NOT EXISTS gtfs_calendar_dates (
+  service_id TEXT, date TEXT, exception_type INTEGER);
 CREATE TABLE IF NOT EXISTS gtfs_meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE INDEX IF NOT EXISTS idx_stop_times_trip ON gtfs_stop_times(trip_id);
 """
@@ -57,6 +59,7 @@ def load_gtfs(zip_path: str | Path, db: sqlite3.Connection) -> str:
 
         db.execute("DELETE FROM gtfs_trips"); db.execute("DELETE FROM gtfs_stop_times")
         db.execute("DELETE FROM gtfs_calendar")
+        db.execute("DELETE FROM gtfs_calendar_dates")
         db.executemany("INSERT INTO gtfs_trips VALUES (?,?,?)",
                        [(r["trip_id"], r["route_id"], r["service_id"]) for r in rows("trips.txt")])
         db.executemany("INSERT INTO gtfs_stop_times VALUES (?,?,?)",
@@ -67,6 +70,10 @@ def load_gtfs(zip_path: str | Path, db: sqlite3.Connection) -> str:
                          ("monday", "tuesday", "wednesday", "thursday", "friday",
                           "saturday", "sunday")], r["start_date"], r["end_date"])
                         for r in rows("calendar.txt")])
+        if "calendar_dates.txt" in zf.namelist():
+            db.executemany("INSERT INTO gtfs_calendar_dates VALUES (?,?,?)",
+                           [(r["service_id"], r["date"], int(r["exception_type"]))
+                            for r in rows("calendar_dates.txt")])
     db.execute("INSERT OR REPLACE INTO gtfs_meta VALUES ('gtfs_hash', ?)", (digest,))
     db.commit()
     return digest
@@ -95,6 +102,16 @@ def scheduled_trips(db: sqlite3.Connection, service_date: dt.date,
     services = {sid for (sid,) in db.execute(
         f"SELECT service_id FROM gtfs_calendar WHERE {col}=1 AND start_date<=? AND end_date>=?",
         (datestr, datestr))}
+    # calendar_dates.txt exceptions override the weekly pattern for this exact date:
+    # type 1 adds a service running that day, type 2 removes one. Applied before the
+    # early-out so an all-exceptions feed (no calendar.txt matches at all) still works.
+    for sid, exc_type in db.execute(
+            "SELECT service_id, exception_type FROM gtfs_calendar_dates WHERE date=?",
+            (datestr,)):
+        if exc_type == 1:
+            services.add(sid)
+        elif exc_type == 2:
+            services.discard(sid)
     if not services:
         return []
     out: list[ScheduledTrip] = []

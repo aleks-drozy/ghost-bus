@@ -4,7 +4,9 @@ EXCLUDED   tracker uptime < 90% of the trip window (our fault, not the operator'
 CANCELLED  feed marked the trip CANCELED during the window
 COMPLETED  progress >= 90% of stops OR last observation within 10 min of scheduled end
 VANISHED   observed, then silent with progress < 75% and > 15 min still to run
-UNTRACKED  zero observations in the window (reported as untracked, not "did not run")
+UNTRACKED  no VEHICLE observation in the window (TripUpdate predictions alone do
+           not prove a bus exists - predictions-without-a-vehicle is exactly the
+           commuter's ghost)
 """
 from __future__ import annotations
 
@@ -33,7 +35,7 @@ def classify_trip(db: sqlite3.Connection, trip: ScheduledTrip) -> str:
          trip.window_start_utc.isoformat(), trip.window_end_utc.isoformat())).fetchall()
     if any(kind == "cancel" for _, kind, _ in rows):
         return "CANCELLED"
-    tracked = [(ts, seq) for ts, kind, seq in rows if kind in ("position", "update")]
+    tracked = [(ts, seq) for ts, kind, seq in rows if kind == "position"]
     if not tracked:
         return "UNTRACKED"
     # Parse before comparing - string order breaks if timestamp formats ever vary.

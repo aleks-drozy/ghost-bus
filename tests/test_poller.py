@@ -2,7 +2,6 @@ import datetime as dt
 import sqlite3
 from pathlib import Path
 
-import pytest
 from google.transit import gtfs_realtime_pb2 as rt
 
 from classify.store import init_store
@@ -79,4 +78,27 @@ def test_fetch_failure_records_bad_heartbeat(tmp_path):
     n = poll_once(db, fetch_fn=boom, now_fn=lambda: now, route_filter=None, archive_dir=None)
     assert n == -1
     assert db.execute("SELECT ok FROM heartbeats").fetchone() == (0,)
+    assert db.execute("SELECT COUNT(*) FROM observations").fetchone() == (0,)
+
+
+def test_position_stop_sequence_zero_is_preserved():
+    raw = make_feed([vehicle("Z", 0)])
+    (o,) = parse_feed(raw)
+    assert o["stop_sequence"] == 0  # real zero, not None
+
+
+def test_update_without_stop_sequences_gives_none():
+    raw = make_feed([trip_update("A")])
+    (o,) = parse_feed(raw)
+    assert o["kind"] == "update" and o["stop_sequence"] is None
+
+
+def test_empty_trip_id_skipped(tmp_path):
+    db = sqlite3.connect(":memory:")
+    init_store(db)
+    raw = make_feed([vehicle("", 2)])
+    now = dt.datetime(2026, 3, 23, 7, 0, tzinfo=UTC)
+    n = poll_once(db, fetch_fn=lambda: raw, now_fn=lambda: now,
+                  route_filter=None, archive_dir=None)
+    assert n == 0
     assert db.execute("SELECT COUNT(*) FROM observations").fetchone() == (0,)

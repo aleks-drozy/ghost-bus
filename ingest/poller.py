@@ -40,7 +40,7 @@ def parse_feed(raw: bytes) -> list[dict]:
         elif entity.HasField("vehicle"):
             v = entity.vehicle
             out.append({"trip_id": v.trip.trip_id, "kind": "position",
-                        "stop_sequence": v.current_stop_sequence or None,
+                        "stop_sequence": v.current_stop_sequence if v.HasField("current_stop_sequence") else None,
                         "start_date": v.trip.start_date})
     return out
 
@@ -48,6 +48,11 @@ def parse_feed(raw: bytes) -> list[dict]:
 def poll_once(db: sqlite3.Connection, fetch_fn: Callable[[], bytes],
               now_fn: Callable[[], dt.datetime], route_filter: set[str] | None,
               archive_dir: Path | None) -> int:
+    """Fetch and ingest one batch of GTFS-Realtime observations.
+
+    route_filter is reserved; observations are not filtered at ingest - route scoping
+    happens at classify time via the timetable join.
+    """
     now = now_fn()
     try:
         raw = fetch_fn()
@@ -64,8 +69,6 @@ def poll_once(db: sqlite3.Connection, fetch_fn: Callable[[], bytes],
     for obs in parse_feed(raw):
         if not obs["trip_id"]:
             continue
-        if route_filter is not None and obs.get("route_id") not in route_filter:
-            pass  # route filtering happens at classify time via the timetable join
         record_observation(db, obs["trip_id"], _service_date(obs["start_date"]),
                            now.isoformat(), obs["kind"], obs["stop_sequence"])
         count += 1

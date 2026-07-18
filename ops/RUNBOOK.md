@@ -88,11 +88,12 @@ the NTA developer portal itself.
 
 ### 2.2 Install the systemd units
 
-**(Phase-2 production entry point - does not exist yet; enabling now will
-crash-loop.)** `ghostbus-poller.service` and `ghostbus-classifier.service`
-`ExecStart` into `ingest.run_poller` and `classify.run_classifier`, neither
-of which is in the repo yet — today's repo only has the importable
-`ingest.poller` / `classify.outcomes` modules those entry points will wrap.
+`ghostbus-poller.service` and `ghostbus-classifier.service` `ExecStart` into
+`ingest.run_poller` and `classify.run_classifier` — both are real entry
+points in the repo as of Phase 2 (`python -m ingest.run_poller`,
+`python -m classify.run_classifier`), wrapping the importable
+`ingest.poller` / `classify.outcomes` modules with production wiring
+(`NTA_API_KEY`, the shared WAL-mode SQLite connection, agency scoping).
 
 ```bash
 sudo cp /opt/ghost-bus/ops/ghostbus-poller.service /etc/systemd/system/
@@ -103,10 +104,9 @@ sudo systemctl daemon-reload
 
 ### 2.3 Enable and start
 
-**(Phase-2 production entry point - does not exist yet; enabling now will
-crash-loop.)** Do not run this section until the entry points named in
-§2.2 exist in the deployed checkout — `Restart=always` will just spin the
-poller unit forever with an `ImportError`.
+Both entry points exist in the deployed checkout, so `Restart=always` is
+safe to rely on for the poller unit — a transient crash restarts into a
+working process rather than spinning on an `ImportError`.
 
 ```bash
 sudo systemctl enable --now ghostbus-poller.service
@@ -204,11 +204,11 @@ schedule, but force a refresh immediately if trip-match failures spike
 ```bash
 cd /opt/ghost-bus
 .venv/bin/python -m timetable.refresh   # Phase-2 production entry point;
-                                        # downloads the latest operator GTFS
-                                        # zip from data.gov.ie, loads it via
+                                        # downloads the static GTFS zip from
+                                        # transportforireland.ie, loads it via
                                         # timetable.gtfs.load_gtfs, and
-                                        # records the new hash + validity
-                                        # window in gtfs_meta.
+                                        # prints a summary (hash, trip count,
+                                        # agency names) once loaded.
 sqlite3 /opt/ghost-bus/state/ghostbus.db \
   "SELECT value FROM gtfs_meta WHERE key='gtfs_hash';"   # confirm the hash changed
 ```

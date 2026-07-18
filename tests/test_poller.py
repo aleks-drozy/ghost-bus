@@ -102,3 +102,25 @@ def test_empty_trip_id_skipped(tmp_path):
                   route_filter=None, archive_dir=None)
     assert n == 0
     assert db.execute("SELECT COUNT(*) FROM observations").fetchone() == (0,)
+
+
+def test_unparseable_feed_is_a_failed_poll(tmp_path):
+    db = sqlite3.connect(":memory:")
+    init_store(db)
+    now = dt.datetime(2026, 3, 23, 7, 0, tzinfo=UTC)
+    n = poll_once(db, fetch_fn=lambda: b"<html>gateway error</html>", now_fn=lambda: now,
+                  route_filter=None, archive_dir=tmp_path)
+    assert n == -1
+    assert db.execute("SELECT ok FROM heartbeats").fetchone() == (0,)
+    assert list(Path(tmp_path).rglob("*.zst")) == []
+
+
+def test_unmatchable_start_date_is_skipped():
+    db = sqlite3.connect(":memory:")
+    init_store(db)
+    raw = make_feed([vehicle("Z", 2, start_date="")])
+    now = dt.datetime(2026, 3, 23, 7, 0, tzinfo=UTC)
+    n = poll_once(db, fetch_fn=lambda: raw, now_fn=lambda: now,
+                  route_filter=None, archive_dir=None)
+    assert n == 0
+    assert db.execute("SELECT COUNT(*) FROM observations").fetchone() == (0,)

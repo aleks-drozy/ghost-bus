@@ -11,11 +11,13 @@ UTC = dt.timezone.utc
 DAY = dt.date(2026, 3, 23)
 
 
-def make_trip(trip_id="T1", start_h=7, dur_min=60, n_stops=5):
+def make_trip(trip_id="T1", start_h=7, dur_min=60, n_stops=5, max_stop_seq=None):
+    max_stop_seq = n_stops if max_stop_seq is None else max_stop_seq
     start = dt.datetime(2026, 3, 23, start_h, 0, tzinfo=UTC)
     end = start + dt.timedelta(minutes=dur_min)
     return ScheduledTrip(trip_id, "R1", DAY, start, end,
-                         start - dt.timedelta(minutes=5), end + dt.timedelta(minutes=15), n_stops)
+                         start - dt.timedelta(minutes=5), end + dt.timedelta(minutes=15),
+                         n_stops, max_stop_seq)
 
 
 @pytest.fixture()
@@ -113,3 +115,24 @@ def test_more_downtime_never_improves_stats(db):
     assert classify_trip(db, trip) == "UNTRACKED"
     db.execute("DELETE FROM heartbeats")
     assert classify_trip(db, trip) == "EXCLUDED"
+
+    # Same monotonicity, but starting from a good outcome: downtime overrides
+    # COMPLETED too, not just UNTRACKED.
+    trip2 = make_trip("T2")
+    beat_window(db, trip2)
+    obs(db, trip2, 55, 5)
+    assert classify_trip(db, trip2) == "COMPLETED"
+    db.execute("DELETE FROM heartbeats")
+    assert classify_trip(db, trip2) == "EXCLUDED"
+
+
+def test_progress_with_non_contiguous_stop_sequences(db):
+    # Real feeds number stops 10,20,...,50: max seq 50, 5 stops.
+    trip = make_trip(n_stops=5, max_stop_seq=50)
+    beat_window(db, trip)
+    obs(db, trip, 30, 20)  # stop 2 of 5 -> progress 0.4, mid-route, early cutoff
+    assert classify_trip(db, trip) == "VANISHED"
+    trip2 = make_trip("T2", n_stops=5, max_stop_seq=50)
+    beat_window(db, trip2)
+    obs(db, trip2, 55, 50)  # final stop -> progress 1.0
+    assert classify_trip(db, trip2) == "COMPLETED"

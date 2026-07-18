@@ -82,6 +82,7 @@ class ScheduledTrip:
     window_start_utc: dt.datetime
     window_end_utc: dt.datetime
     n_stops: int
+    max_stop_seq: int
 
 
 _WEEKDAY_COLS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
@@ -102,13 +103,14 @@ def scheduled_trips(db: sqlite3.Connection, service_date: dt.date,
             f"SELECT trip_id, route_id FROM gtfs_trips WHERE service_id IN ({marks})",
             tuple(services)):
         row = db.execute(
-            "SELECT MIN(dep_seconds), MAX(dep_seconds), COUNT(*) FROM gtfs_stop_times WHERE trip_id=?",
+            "SELECT MIN(dep_seconds), MAX(dep_seconds), COUNT(*), MAX(stop_sequence) "
+            "FROM gtfs_stop_times WHERE trip_id=?",
             (trip_id,)).fetchone()
-        first_s, last_s, n_stops = row
+        first_s, last_s, n_stops, max_stop_seq = row
         start = local_from_service(service_date, first_s, tz).astimezone(UTC)
         end = local_from_service(service_date, last_s, tz).astimezone(UTC)
         out.append(ScheduledTrip(
             trip_id, route_id, service_date, start, end,
-            start - dt.timedelta(minutes=5), end + dt.timedelta(minutes=15), n_stops))
+            start - dt.timedelta(minutes=5), end + dt.timedelta(minutes=15), n_stops, max_stop_seq))
     out.sort(key=lambda t: (t.start_utc, t.trip_id))
     return out

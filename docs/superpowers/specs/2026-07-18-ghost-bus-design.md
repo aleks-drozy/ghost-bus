@@ -139,3 +139,14 @@ touch ≈ minutes/month + acting on healthcheck alerts.
 - The tracker's own outages: self-reported, always.
 - No scraping, official API + open data only; NTA licence terms respected
   (attribution on site).
+
+## Amendments
+
+- 2026-07-18 (final review, H1): TripUpdates are predictions, not evidence a
+  vehicle exists. Only VehiclePositions count as observation for
+  COMPLETED/VANISHED/UNTRACKED; TripUpdates retain their role for CANCELLED
+  detection. Predictions-without-a-vehicle now lands in UNTRACKED - which is
+  exactly the commuter's ghost. Live VehiclePositions coverage is a
+  mandatory Phase-3 burn-in verification before any published number.
+- 2026-07-18 (final review, H3): calendar_dates.txt exceptions implemented
+  (bank holidays would otherwise publish false ghost spikes).

@@ -88,6 +88,12 @@ the NTA developer portal itself.
 
 ### 2.2 Install the systemd units
 
+**(Phase-2 production entry point - does not exist yet; enabling now will
+crash-loop.)** `ghostbus-poller.service` and `ghostbus-classifier.service`
+`ExecStart` into `ingest.run_poller` and `classify.run_classifier`, neither
+of which is in the repo yet — today's repo only has the importable
+`ingest.poller` / `classify.outcomes` modules those entry points will wrap.
+
 ```bash
 sudo cp /opt/ghost-bus/ops/ghostbus-poller.service /etc/systemd/system/
 sudo cp /opt/ghost-bus/ops/ghostbus-classifier.service /etc/systemd/system/
@@ -96,6 +102,11 @@ sudo systemctl daemon-reload
 ```
 
 ### 2.3 Enable and start
+
+**(Phase-2 production entry point - does not exist yet; enabling now will
+crash-loop.)** Do not run this section until the entry points named in
+§2.2 exist in the deployed checkout — `Restart=always` will just spin the
+poller unit forever with an `ImportError`.
 
 ```bash
 sudo systemctl enable --now ghostbus-poller.service
@@ -204,8 +215,11 @@ sqlite3 /opt/ghost-bus/state/ghostbus.db \
 
 ### 4.3 Disk cleanup — archives older than 7 days
 
-Raw zstd snapshots are kept for 7 days by design (see `ingest/poller.py`).
-If disk pressure appears sooner (`df -h /opt/ghost-bus`), clean up manually:
+Raw zstd snapshots are pruned by the `find` command below, not by any
+retention logic in `ingest/poller.py` itself — the poller only ever writes
+snapshots, it never deletes them. Schedule this as a cron job (it is not
+wired up automatically yet); until then, run it manually if disk pressure
+appears (`df -h /opt/ghost-bus`):
 
 ```bash
 find /opt/ghost-bus/data -name '*.pb.zst' -mtime +7 -print -delete

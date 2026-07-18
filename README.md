@@ -30,6 +30,11 @@ window = scheduled start − 5 min → scheduled end + 15 min.
 | VANISHED | observed, then no signal for the rest of the window with progress < 75% and > 15 min left — tracked, then gone mid-route |
 | UNTRACKED | zero observations in the whole window (uptime ≥ 90%) — the classic ghost. Reported as *untracked*, not "did not run": a dead telematics unit looks identical to a bus that never left the depot, and we say so |
 
+One residual case is decided in the operator's favour: a trip that is
+neither clearly completed nor clearly vanished (including any trip last
+seen 10-15 minutes before its scheduled end) counts as COMPLETED — benefit
+of the doubt.
+
 **Headline metric:** ghost rate = (UNTRACKED + VANISHED) / (scheduled − EXCLUDED),
 per route, per hour-of-day, per day.
 
@@ -40,11 +45,16 @@ data, to a gap in a bus's telematics — and it would be dishonest to charge
 the operator for our own downtime. So every window where poller uptime drops
 below 90% is pulled out of the operator's stats entirely and counted
 instead as tracker downtime, in public, on the same site as the bus data.
-The scoreboard ships alongside a 30-day tracker-uptime strip, and a publish
-gate (`run_checks.py`) refuses to let any aggregate ship if its class counts
-don't reconcile with the trip-level outcomes that produced them, if any
-ghost rate falls outside [0, 1], or if any outcome isn't one of the five
-valid classes. The site never publishes numbers these checks didn't pass.
+The scoreboard ships alongside a 30-day tracker-uptime strip, gated by
+`run_checks.py`. Today that gate validates the outcome vocabulary (every
+outcome is one of the five valid classes) and the internal consistency of
+the rollup code path itself — that its own aggregate class counts reconcile
+with the trip-level outcomes that produced them, and that no ghost rate
+falls outside [0, 1]. That is a correctness check on the aggregation logic,
+not yet an independent reconciliation against the raw archived feed
+snapshots; that independent artifact reconciliation lands with the
+publisher (Phase 2). The site never publishes numbers today's gate didn't
+pass.
 
 ## Quick start
 
@@ -66,8 +76,8 @@ plus real GTFS-Realtime protobufs built in-process.
 
 **Core pipeline: complete and tested.** The timetable engine, five-class
 classifier, route/day and route/hour aggregates, offline-testable poller,
-and publish gate are all implemented and covered by the test suite (43
-tests, no network, CI-enforced on every push).
+and publish gate are all implemented and covered by the test suite (47
+tests, no network, runs in CI on every push once the repo is published).
 
 **Live deployment: pending two owner tasks** — an NTA developer API key
 (free, from `developer.nationaltransport.ie`) and an Oracle Cloud free-tier
@@ -75,6 +85,20 @@ VM. Once both exist, `ops/RUNBOOK.md` is the complete, copy-pasteable
 provisioning-through-recovery guide for standing the pipeline up for real.
 Nothing about the pipeline's logic changes at that point — only that it
 starts seeing the live feed instead of fixtures.
+
+## Known limitations (v1 core, before live burn-in)
+
+- **VehiclePositions coverage on the live NTA feed is unverified.** If
+  vehicles are sparsely reported, UNTRACKED will overcount — burn-in
+  (Phase 3) must measure this before any number is published.
+- **Advance cancellations that leave the feed before a trip's window opens
+  would classify UNTRACKED**, not CANCELLED — feed retention behaviour
+  around cancellations is to be verified in burn-in.
+- **Feed staleness is not yet detected** — a frozen upstream feed would look
+  like healthy polling. A staleness check is planned for Phase 2.
+- **Hour-of-day statistics pool across dates** — the route/hour rollup does
+  not distinguish, say, "Tuesdays at 5pm" from every day at 5pm ever
+  observed.
 
 ## Architecture
 

@@ -1,0 +1,8 @@
+[Unit]
+Description=Ghost Bus classifier pass
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ghost-bus
+EnvironmentFile=/etc/ghostbus.env
+ExecStart=/opt/ghost-bus/.venv/bin/python -m classify.run_classifier

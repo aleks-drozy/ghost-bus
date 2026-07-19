@@ -233,9 +233,16 @@ Drop `-delete` first to dry-run and confirm the file list before deleting.
 
 Deploys the spec amendment described in the README's Methodology section:
 route progress is now measured by matching vehicle GPS to the trip's
-nearest scheduled stop, in addition to feed `stop_sequence`. Order-
-independent — each step below degrades gracefully until the others have
-run — but this sequence starts coordinate capture soonest:
+nearest scheduled stop, in addition to feed `stop_sequence`. **Restart the
+poller promptly after pulling.** The classifier timer fires every 10
+minutes, and between `git pull` and the poller restart it can run a
+classifier pass on the new code, which migrates the `observations` schema.
+If that happens, the still-running old poller then crashes once on its
+next write (a 5-value `INSERT` against a now-7-column table: "table
+observations has 7 columns but 5 values") — `systemd`'s `Restart=always`
+re-execs it straight into the pulled code, so recovery is automatic and
+the cost is at most one poll's observations lost after an ok heartbeat.
+This sequence starts coordinate capture soonest:
 
 1. Pull the update:
 
@@ -267,3 +274,20 @@ run — but this sequence starts coordinate capture soonest:
    `250`) — the classifier is a `oneshot` unit and rereads the env file
    fresh on every run, so no service restart is needed for this to take
    effect either.
+
+5. Time the first post-deploy classifier run as a sanity check on VM CPU —
+   geographic matching adds real per-trip compute (haversine over every
+   ping x every stop) that the pre-G1 classifier never paid for:
+
+   ```bash
+   journalctl -u ghostbus-classifier.service -n 20 --no-pager
+   ```
+
+   Compare the timestamp gap between the unit's start and finish log lines
+   against pre-G1 runs. A run stretching well past the classifier's own
+   10-minute timer period on the free-tier VM is the first sign the match
+   radius or trip volume needs attention: outcome writes are buffered until
+   after classification finishes (so a slow pass no longer holds a write
+   lock open against the poller), but the classification pass itself is
+   still single-threaded on shared CPU and a long-running geo-match sweep
+   is still worth catching early.

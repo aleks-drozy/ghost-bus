@@ -222,7 +222,7 @@ wired up automatically yet); until then, run it manually if disk pressure
 appears (`df -h /opt/ghost-bus`):
 
 ```bash
-find /opt/ghost-bus/data -name '*.pb.zst' -mtime +7 -print -delete
+find /opt/ghost-bus/state/archive -name '*.pb.zst' -mtime +7 -print -delete
 ```
 
 Drop `-delete` first to dry-run and confirm the file list before deleting.
@@ -424,35 +424,51 @@ filled <N>; already had coordinates <N>; no stored observation <N>; ambiguous <N
   that got archived but whose parse the live poller itself skipped for an
   unrelated reason); a number close to **coordinate pings** means the join
   key is broken and the run needs to stop before `--apply`.
-- **ambiguous** — pings whose join key is not unique. Most commonly, *two or
-  more pings in the same snapshot* share a key — two vehicles reported the
-  same `trip_id` in the same poll, and this tool's key (`trip_id`,
-  `service_date`, second-resolution `ts_utc`) cannot tell them apart. Rarer:
-  a single ping's key matches more than one stored row already in
-  `observations`. Either way, writing would risk pinning one vehicle's real
-  coordinates onto the wrong row — a wrong coordinate, which is worse than
-  the missing one this tool exists to fix — so none of the colliding
-  candidates are touched. This is deliberately independent of how many
-  stored rows currently exist for the key: an interrupted poll can leave the
-  archive ahead of the database (see "no stored observation" above), and a
-  guard that only looked at stored-row count would let the first of two
-  colliding pings write, then silently absorb the second into "already had
-  coordinates" once its probe saw the first one's own update. This counter
-  is where the collision stays visible instead. **A nonzero `ambiguous`
-  count is not a bug in this tool — it is the tool refusing to guess.** It
-  should stay small; if it is a large fraction of `coordinate pings`, treat
-  that as a feed data-quality finding worth its own investigation, not
-  something to work around here.
+- **ambiguous** — pings whose join key is not unique. This now covers three
+  cases, all refused the same way: writing would risk pinning one vehicle's
+  real coordinates onto the wrong row — a wrong coordinate, which is worse
+  than the missing one this tool exists to fix — so none of the colliding
+  candidates are touched.
+  - *Two or more pings in the same snapshot* share a key — two vehicles
+    reported the same `trip_id` in the same poll, and this tool's key
+    (`trip_id`, `service_date`, second-resolution `ts_utc`) cannot tell them
+    apart.
+  - Rarer: a single ping's key matches more than one stored row already in
+    `observations`.
+  - *Two different archive files resolve to the same `ts_prefix`* — the walk
+    is recursive, so this can happen from anywhere in the tree (a
+    per-endpoint subdirectory, a copied day directory, a partial restore
+    placed alongside the original), not just two entities inside one
+    snapshot. Every ping in every file sharing that prefix is counted
+    ambiguous, and each colliding path is printed to stderr on its own line:
+    `ambiguous snapshot <path>: shares timestamp <ts_prefix> with <other
+    path(s)> - refusing to guess which file's pings belong to which row`.
+
+  This is deliberately independent of how many stored rows currently exist
+  for the key: an interrupted poll can leave the archive ahead of the
+  database (see "no stored observation" above), and a guard that only looked
+  at stored-row count would let the first of two colliding pings write, then
+  silently absorb the second into "already had coordinates" once its probe
+  saw the first one's own update. This counter is where the collision stays
+  visible instead. **A nonzero `ambiguous` count is not a bug in this tool —
+  it is the tool refusing to guess.** It should stay small; if it is a large
+  fraction of `coordinate pings`, treat that as a feed data-quality finding
+  worth its own investigation (or, for the cross-file case, a stray copy in
+  the archive tree worth cleaning up), not something to work around here.
 - **unreadable** — snapshot files that failed to decompress or parse (a
   truncated zstd frame, a gateway error page the poller archived before the
   parse guard existed) or whose filename could not be parsed into a
-  timestamp at all. Each one is printed to stderr with the file path as
-  it's counted — the decompress/parse failures also include the exception
-  repr, the unrecognisable-filename case states plainly that the filename
-  couldn't be parsed — so a spike here is diagnosable rather than an opaque
-  number — check whether it's a handful of known-corrupt files (fine) or a
-  new failure mode (not
-  fine, look at the printed exceptions).
+  timestamp at all. The filename check requires an exact `HHMMSS.pb.zst`
+  name, so a stale backup, numbered copy, or in-progress-write left in the
+  archive tree (`215141.bak.pb.zst`, `215141.1.pb.zst`, `215141.tmp.pb.zst`)
+  lands here too, rather than being decoded and silently resolving to the
+  same timestamp as the real file. Each one is printed to stderr with the
+  file path as it's counted — the decompress/parse failures also include the
+  exception repr, the unrecognisable-filename case states plainly that the
+  filename couldn't be parsed — so a spike here is diagnosable rather than an
+  opaque number — check whether it's a handful of known-corrupt or stray
+  files (fine) or a new failure mode (not fine, look at the printed
+  exceptions).
 
 ### 7.2 Safety
 

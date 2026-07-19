@@ -110,21 +110,26 @@ class Counts:
                      vehicle_ts - that must converge to "nothing to do", not
                      stay "fillable" forever)
     no_row           pings with no stored observation at all to attach to
-    ambiguous        pings whose join key is not unique - either two or more
-                     pings in this same snapshot share a key, or (rarer) a
-                     single ping's key matches more than one stored row.
-                     Two vehicles reporting the same trip_id in one snapshot
-                     are indistinguishable by this tool's join key, so
-                     neither candidate is written. This is deliberately
-                     independent of stored-row count: with one stored row
-                     and two same-key pings, writing the first would make
-                     the second's probe see the first's own UPDATE and look
-                     like "already filled", silently discarding a genuinely
+    ambiguous        pings whose join key is not unique - two or more pings in
+                     the same snapshot share a key, a single ping's key
+                     matches more than one stored row, or (see backfill_archive)
+                     two different archive files share the same ts_prefix, so
+                     every ping in every one of those files is refused before
+                     any of them is probed or written. Two vehicles reporting
+                     the same trip_id in one snapshot, or two files keying to
+                     the same second from anywhere in the archive tree, are
+                     indistinguishable by this tool's join key, so neither
+                     candidate is written. This is deliberately independent
+                     of stored-row count: with one stored row and two
+                     same-key pings, writing the first would make the
+                     second's probe see the first's own UPDATE and look like
+                     "already filled", silently discarding a genuinely
                      distinct GPS reading. Grouping by the snapshot itself
-                     - before any probe or write - closes that hole. A
-                     wrong coordinate is worse than a missing one, and this
-                     count is how that stays visible instead of being
-                     silently folded into already_filled.
+                     - before any probe or write - closes that hole, and the
+                     archive walk closes the same hole across files. A wrong
+                     coordinate is worse than a missing one, and this count
+                     is how that stays visible instead of being silently
+                     folded into already_filled.
     """
 
     files: int = 0
@@ -140,6 +145,23 @@ class Counts:
                         for f in fields(self)))
 
 
+def _usable_pings(raw: bytes):
+    """Every position ping in a decoded snapshot that a join key can be built
+    from - trip_id present, start_date an 8-digit service date, an actual
+    coordinate. Shared between backfill_file's grouping and the archive
+    walk's collision-ping count so both agree, by construction, on what
+    counts as a ping: the same skip rules the poller itself applies.
+    """
+    for obs in parse_feed(raw):
+        if obs["kind"] != "position" or obs["lat"] is None:
+            continue
+        if not obs["trip_id"]:
+            continue
+        if len(obs["start_date"]) != 8 or not obs["start_date"].isdigit():
+            continue
+        yield obs
+
+
 def backfill_file(db: sqlite3.Connection, raw: bytes, ts_prefix: str,
                   apply: bool, fill_columns: tuple[str, ...] = _REQUIRED_FILL_COLUMNS
                   ) -> Counts:
@@ -148,6 +170,11 @@ def backfill_file(db: sqlite3.Connection, raw: bytes, ts_prefix: str,
 
     Dry-run and apply agree on every count: both derive them from the same probe
     query, so a dry run is an honest preview rather than a separate estimate.
+
+    Callers must have already established that this snapshot's ts_prefix is
+    not shared with any other file in the walk (see backfill_archive) - this
+    function only ever sees collisions WITHIN this one snapshot; cross-file
+    collisions are a precondition its caller is responsible for ruling out.
     """
     res = Counts(files=1)
     probe_sql, update_sql = _build_sql(fill_columns)
@@ -159,13 +186,7 @@ def backfill_file(db: sqlite3.Connection, raw: bytes, ts_prefix: str,
     # "already filled" on its probe, which silently discarded a genuinely
     # different GPS reading with no ambiguous counter and no stderr.
     groups: dict[tuple[str, str, str], list[dict]] = {}
-    for obs in parse_feed(raw):
-        if obs["kind"] != "position" or obs["lat"] is None:
-            continue
-        if not obs["trip_id"]:
-            continue
-        if len(obs["start_date"]) != 8 or not obs["start_date"].isdigit():
-            continue
+    for obs in _usable_pings(raw):
         res.pings += 1
         key = (obs["trip_id"], _service_date(obs["start_date"]), ts_prefix)
         groups.setdefault(key, []).append(obs)
@@ -217,9 +238,19 @@ def ts_prefix_from_path(path: Path) -> str | None:
     state/archive/20260718/215141.pb.zst -> "2026-07-18T21:51:41".
     Returns None for anything that isn't a well-formed archive path, so a stray
     file in the archive tree is skipped rather than mis-keyed onto real rows.
+
+    The whole filename has to match, not just the part before the first dot:
+    split(".")[0] let a stale-copy or in-progress-write suffix - 215141.bak.pb.zst,
+    215141.1.pb.zst, 215141.tmp.pb.zst - resolve to the exact same prefix as the
+    real 215141.pb.zst, so the glob's own sort order silently decided which file
+    "won" the join key. Rejecting anything but an exact HHMMSS.pb.zst name means
+    a suffixed duplicate falls into the unreadable/unparseable-filename path
+    below instead of ever being mis-keyed onto real rows.
     """
+    if not path.name.endswith(".pb.zst"):
+        return None
     day = path.parent.name
-    time_part = path.name.split(".")[0]
+    time_part = path.name[: -len(".pb.zst")]
     # strptime alone is not enough: %H/%M/%S each accept one OR two digits, so
     # it happily backtracks a short name like "2151" into a valid-looking time.
     # A key that addresses real rows has to be exactly as wide as it claims.
@@ -242,13 +273,37 @@ def backfill_archive(db: sqlite3.Connection, archive_dir: Path, apply: bool,
     only copy of this evidence and a single truncated frame must not cost the
     other 700-odd files. Each file commits on its own so a long run stays
     interruptible and never holds the write lock away from the live poller.
+
+    ts_prefix is constant per file (it comes only from the path), so two
+    files can share a join key only if they share a ts_prefix. This walk is
+    recursive (rglob) and ts_prefix_from_path reads only the day directory
+    and file name - two files can therefore collide from anywhere in the
+    tree, not just two entities inside one snapshot. Before replaying
+    anything, every kept path is grouped by its ts_prefix; any prefix owned
+    by more than one path is refused entirely - none of the colliding files'
+    pings are probed or written, no matter what backfill_file's own
+    within-snapshot guard would have concluded on its own.
     """
     fill_columns = _resolve_fill_columns(db)
     total = Counts()
     dctx = zstandard.ZstdDecompressor()
-    for path in sorted(Path(archive_dir).rglob("*.pb.zst")):
-        if days is not None and path.parent.name not in days:
-            continue
+
+    paths = [p for p in sorted(Path(archive_dir).rglob("*.pb.zst"))
+             if days is None or p.parent.name in days]
+
+    # Pass 1: derive every path's ts_prefix from its name alone (no decode
+    # needed - the prefix never depends on file contents) and find which
+    # prefixes more than one path claims.
+    owners_by_prefix: dict[str, list[Path]] = {}
+    for path in paths:
+        ts_prefix = ts_prefix_from_path(path)
+        if ts_prefix is not None:
+            owners_by_prefix.setdefault(ts_prefix, []).append(path)
+    colliding = {prefix: owners for prefix, owners in owners_by_prefix.items()
+                if len(owners) > 1}
+
+    # Pass 2: the actual replay - one decode per file, exactly as before.
+    for path in paths:
         ts_prefix = ts_prefix_from_path(path)
         if ts_prefix is None:
             # Same stderr contract as the zstd/parse failure path below: the
@@ -262,12 +317,36 @@ def backfill_archive(db: sqlite3.Connection, archive_dir: Path, apply: bool,
         try:
             with dctx.stream_reader(io.BytesIO(path.read_bytes())) as reader:
                 raw = reader.read()
-            res = backfill_file(db, raw, ts_prefix, apply, fill_columns)
         except _UNREADABLE as exc:
             # Surface the failing path and the real exception - a future
             # logic bug hiding behind this broad catch tuple must be
             # diagnosable, not indistinguishable from ordinary archive
             # corruption during a live run.
+            print(f"unreadable snapshot {path}: {exc!r}", file=sys.stderr)
+            total.unreadable += 1
+            continue
+
+        owners = colliding.get(ts_prefix)
+        if owners is not None:
+            others = ", ".join(str(o) for o in owners if o != path)
+            print(f"ambiguous snapshot {path}: shares timestamp {ts_prefix} with "
+                  f"{others} - refusing to guess which file's pings belong to "
+                  f"which row", file=sys.stderr)
+            try:
+                n = sum(1 for _ in _usable_pings(raw))
+            except _UNREADABLE as exc:
+                print(f"unreadable snapshot {path}: {exc!r}", file=sys.stderr)
+                total.unreadable += 1
+                continue
+            total.pings += n
+            total.ambiguous += n
+            if progress_fn is not None:
+                progress_fn(path, total)
+            continue
+
+        try:
+            res = backfill_file(db, raw, ts_prefix, apply, fill_columns)
+        except _UNREADABLE as exc:
             print(f"unreadable snapshot {path}: {exc!r}", file=sys.stderr)
             total.unreadable += 1
             continue

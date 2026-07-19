@@ -22,6 +22,7 @@ DEFAULT_ARCHIVE_DIR = "state/archive"
 # GHOSTBUS_AGENCIES env var - a silent mismatch here means every trip gets
 # filtered out and the classifier reports nothing, with no error.
 DEFAULT_AGENCIES = "Dublin Bus,Go-Ahead Ireland"
+DEFAULT_MATCH_RADIUS_M = 250.0
 
 
 def get_db(path: str | None = None) -> sqlite3.Connection:
@@ -44,3 +45,7 @@ def read_archive_dir() -> Path:
 def read_agency_names() -> set[str]:
     raw = os.environ.get("GHOSTBUS_AGENCIES", DEFAULT_AGENCIES)
     return {name.strip() for name in raw.split(",") if name.strip()}
+
+
+def read_match_radius_m() -> float:
+    return float(os.environ.get("GHOSTBUS_MATCH_RADIUS_M", DEFAULT_MATCH_RADIUS_M))

@@ -58,3 +58,13 @@ def test_read_agency_names_override(monkeypatch):
 def test_read_agency_names_strips_blanks(monkeypatch):
     monkeypatch.setenv("GHOSTBUS_AGENCIES", "Dublin Bus,,  ")
     assert cfg.read_agency_names() == {"Dublin Bus"}
+
+
+def test_read_match_radius_default(monkeypatch):
+    monkeypatch.delenv("GHOSTBUS_MATCH_RADIUS_M", raising=False)
+    assert cfg.read_match_radius_m() == 250.0
+
+
+def test_read_match_radius_override(monkeypatch):
+    monkeypatch.setenv("GHOSTBUS_MATCH_RADIUS_M", "150")
+    assert cfg.read_match_radius_m() == 150.0

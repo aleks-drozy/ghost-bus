@@ -35,18 +35,23 @@ def parse_feed(raw: bytes) -> list[dict]:
             tu = entity.trip_update
             if tu.trip.schedule_relationship == rt.TripDescriptor.CANCELED:
                 out.append({"trip_id": tu.trip.trip_id, "kind": "cancel",
-                            "stop_sequence": None, "start_date": tu.trip.start_date})
+                            "stop_sequence": None, "start_date": tu.trip.start_date,
+                            "lat": None, "lon": None})
             else:
                 seqs = [stu.stop_sequence for stu in tu.stop_time_update
                         if stu.HasField("stop_sequence")]
                 out.append({"trip_id": tu.trip.trip_id, "kind": "update",
                             "stop_sequence": max(seqs) if seqs else None,
-                            "start_date": tu.trip.start_date})
+                            "start_date": tu.trip.start_date,
+                            "lat": None, "lon": None})
         elif entity.HasField("vehicle"):
             v = entity.vehicle
+            has_pos = v.HasField("position")
             out.append({"trip_id": v.trip.trip_id, "kind": "position",
                         "stop_sequence": v.current_stop_sequence if v.HasField("current_stop_sequence") else None,
-                        "start_date": v.trip.start_date})
+                        "start_date": v.trip.start_date,
+                        "lat": v.position.latitude if has_pos else None,
+                        "lon": v.position.longitude if has_pos else None})
     return out
 
 
@@ -83,7 +88,8 @@ def poll_once(db: sqlite3.Connection, fetch_fn: Callable[[], bytes],
         if len(obs["start_date"]) != 8 or not obs["start_date"].isdigit():
             continue
         record_observation(db, obs["trip_id"], _service_date(obs["start_date"]),
-                           now.isoformat(), obs["kind"], obs["stop_sequence"])
+                           now.isoformat(), obs["kind"], obs["stop_sequence"],
+                           obs["lat"], obs["lon"])
         count += 1
     return count
 

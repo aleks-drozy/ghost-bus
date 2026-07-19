@@ -126,8 +126,10 @@ starts seeing the live feed instead of fixtures.
   which is operator-flattering, but choosing a staleness threshold before
   seeing the real lag distribution would just be guessing. Burn-in measures
   the distribution (`ops/RUNBOOK.md` §6); a methodology amendment follows the
-  data, not the other way round. Pre-G2 rows have `vehicle_ts` NULL and are
-  not evidence of freshness either way.
+  data, not the other way round. There is no amendment number for this: it is
+  a schema addition, and the methodology is unchanged since G1. Rows recorded
+  before the column existed have `vehicle_ts` NULL and are not evidence of
+  freshness either way.
 - **Hour-of-day statistics pool across dates** — the route/hour rollup does
   not distinguish, say, "Tuesdays at 5pm" from every day at 5pm ever
   observed.

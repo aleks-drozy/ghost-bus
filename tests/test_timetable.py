@@ -133,6 +133,18 @@ def test_load_stores_route_names(db):
     assert rows["R3"] == ("3", "Fixtureville Crosstown")
 
 
+def test_stop_rows_skips_ragged_and_unparseable_rows():
+    # csv.DictReader fills missing trailing fields with None (restval), so a
+    # truncated stops.txt row must be skipped (TypeError), like blank strings
+    # (ValueError) and missing keys (KeyError) - never crash the load.
+    from timetable.gtfs import _stop_rows
+    rows = [{"stop_id": "OK", "stop_lat": "53.3", "stop_lon": "-6.2"},
+            {"stop_id": "RAGGED", "stop_lat": None, "stop_lon": None},
+            {"stop_id": "BLANK", "stop_lat": "", "stop_lon": ""},
+            {"stop_id": "NOKEYS"}]
+    assert list(_stop_rows(rows)) == [("OK", 53.3, -6.2)]
+
+
 def test_load_migrates_legacy_schema(tmp_path):
     # A DB created by the pre-G1 loader: no stop_id column, no name columns,
     # no gtfs_stops table. load_gtfs must migrate it in place.

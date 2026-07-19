@@ -79,7 +79,7 @@ def _stop_rows(rows):
     for r in rows:
         try:
             yield (r["stop_id"], float(r["stop_lat"]), float(r["stop_lon"]))
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, TypeError):
             continue  # uncodable stop: it simply can't participate in geo matching
 
 

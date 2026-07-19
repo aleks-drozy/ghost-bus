@@ -67,3 +67,27 @@ def test_invalid_observation_kind_raises(db):
 def test_empty_window_uptime_is_zero(db):
     fill_heartbeats(db, T0, 10)
     assert uptime(db, T0, T0) == 0.0
+
+
+def test_observation_roundtrip_with_coordinates(db):
+    record_observation(db, "R1_wk_00", "2026-03-23", T0.isoformat(), "position",
+                       None, 53.3036, -6.2)
+    rows = db.execute("SELECT stop_sequence, lat, lon FROM observations").fetchall()
+    assert rows == [(None, pytest.approx(53.3036), pytest.approx(-6.2))]
+
+
+def test_init_store_migrates_legacy_observations():
+    # A DB written by the pre-G1 poller: no lat/lon columns, existing rows.
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE observations (trip_id TEXT, service_date TEXT, "
+                 "ts_utc TEXT, kind TEXT, stop_sequence INTEGER)")
+    conn.execute("INSERT INTO observations VALUES "
+                 "('T1','2026-03-23','2026-03-23T07:00:00+00:00','position',2)")
+    init_store(conn)
+    row = conn.execute(
+        "SELECT trip_id, stop_sequence, lat, lon FROM observations").fetchone()
+    assert row == ("T1", 2, None, None)  # legacy row intact, coords NULL
+    record_observation(conn, "T2", "2026-03-23", T0.isoformat(), "position",
+                       1, 53.3, -6.2)  # new writes work post-migration
+    (n,) = conn.execute("SELECT COUNT(*) FROM observations").fetchone()
+    assert n == 2

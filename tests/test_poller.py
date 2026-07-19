@@ -170,6 +170,25 @@ def test_parse_vehicle_explicit_zero_timestamp_gives_none():
     assert o["vehicle_ts"] is None
 
 
+def test_absurd_vehicle_timestamp_degrades_to_none_without_failing_the_poll(tmp_path):
+    # vehicle.timestamp is uint64: a corrupt value out of datetime's range must
+    # cost us that one field, never the whole batch. Raising here would surface
+    # as a failed poll -> apparent tracker downtime -> trips wrongly EXCLUDED.
+    db = sqlite3.connect(":memory:")
+    init_store(db)
+    good_ts = dt.datetime(2026, 3, 23, 6, 39, tzinfo=UTC)
+    raw = make_feed([vehicle("BAD", 1, ts=2**40),
+                     vehicle("GOOD", 2, ts=int(good_ts.timestamp()))])
+    now = dt.datetime(2026, 3, 23, 7, 0, tzinfo=UTC)
+    n = poll_once(db, fetch_fn=lambda: raw, now_fn=lambda: now,
+                  route_filter=None, archive_dir=None)
+    assert n == 2  # both observations survived
+    assert db.execute("SELECT ok FROM heartbeats").fetchone() == (1,)
+    rows = dict(db.execute("SELECT trip_id, vehicle_ts FROM observations"))
+    assert rows["BAD"] is None
+    assert rows["GOOD"] == "2026-03-23T06:39:00+00:00"
+
+
 def test_parse_updates_and_cancels_carry_no_vehicle_ts():
     raw = make_feed([trip_update("A", max_seq=4), trip_update("B", cancelled=True)])
     for o in parse_feed(raw):

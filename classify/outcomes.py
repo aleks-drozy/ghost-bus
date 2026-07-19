@@ -34,11 +34,15 @@ def _trip_stop_coords(db: sqlite3.Connection, trip_id: str) -> list[tuple[int, f
             "SELECT st.stop_sequence, s.lat, s.lon FROM gtfs_stop_times st "
             "JOIN gtfs_stops s ON s.stop_id = st.stop_id WHERE st.trip_id=?",
             (trip_id,)).fetchall()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
         # Pre-refresh database (no gtfs_stops table / stop_id column yet):
-        # geographic evidence is simply unavailable, never an error - progress
-        # falls back to feed stop_sequence alone, i.e. pre-G1 behavior.
-        return []
+        # geographic evidence is simply unavailable - progress falls back to
+        # feed stop_sequence alone, i.e. pre-G1 behavior. Anything else
+        # (I/O error, corruption) must crash: silently dropping geo evidence
+        # would shift outcomes toward VANISHED against the published method.
+        if "no such table" in str(exc) or "no such column" in str(exc):
+            return []
+        raise
 
 
 def classify_trip(db: sqlite3.Connection, trip: ScheduledTrip,
@@ -61,7 +65,12 @@ def classify_trip(db: sqlite3.Connection, trip: ScheduledTrip,
     # Geographic evidence (amendment G1): GPS pings matched to the trip's own
     # scheduled stops. Merges with feed stop_sequence by max - it can only
     # RAISE progress, never lower it or affect any other class.
-    pings = [(lat, lon) for _, _, lat, lon in tracked if lat is not None and lon is not None]
+    # Only pings at/after the scheduled start carry progress: a vehicle keyed
+    # to the trip during the 5-min pre-window (layover near a terminus) must
+    # not complete a trip that never departed. Existence still counts above.
+    pings = [(lat, lon) for ts, _, lat, lon in tracked
+             if lat is not None and lon is not None
+             and dt.datetime.fromisoformat(ts) >= trip.start_utc]
     if pings:
         geo_seq = matched_max_seq(_trip_stop_coords(db, trip.trip_id), pings, radius_m)
         if geo_seq is not None:
@@ -82,13 +91,17 @@ def classify_day(db: sqlite3.Connection, trips: list[ScheduledTrip],
                  now_utc: dt.datetime, radius_m: float = 250.0) -> dict[str, str]:
     db.executescript(_OUTCOMES_SCHEMA)
     results: dict[str, str] = {}
+    rows: list[tuple] = []
+    # Classify first, write after: classify_trip is minutes of pure-read compute
+    # at day scale, and an open write transaction across it would starve the
+    # live poller (busy_timeout 30 s) on the shared SQLite file.
     for trip in trips:
         if trip.window_end_utc > now_utc:
             continue
         outcome = classify_trip(db, trip, radius_m)
         results[trip.trip_id] = outcome
-        db.execute("INSERT OR REPLACE INTO trip_outcomes VALUES (?,?,?,?,?)",
-                   (trip.trip_id, str(trip.service_date), trip.route_id,
-                    trip.start_utc.isoformat(), outcome))
+        rows.append((trip.trip_id, str(trip.service_date), trip.route_id,
+                     trip.start_utc.isoformat(), outcome))
+    db.executemany("INSERT OR REPLACE INTO trip_outcomes VALUES (?,?,?,?,?)", rows)
     db.commit()
     return results

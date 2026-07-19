@@ -2,6 +2,7 @@ import datetime as dt
 import sqlite3
 from pathlib import Path
 
+import pytest
 from google.transit import gtfs_realtime_pb2 as rt
 
 from classify.store import init_store
@@ -33,12 +34,15 @@ def trip_update(trip_id, start_date="20260323", cancelled=False, max_seq=None):
     return e
 
 
-def vehicle(trip_id, seq, start_date="20260323"):
+def vehicle(trip_id, seq, start_date="20260323", lat=None, lon=None):
     e = rt.FeedEntity()
     e.id = f"v-{trip_id}"
     e.vehicle.trip.trip_id = trip_id
     e.vehicle.trip.start_date = start_date
     e.vehicle.current_stop_sequence = seq
+    if lat is not None:
+        e.vehicle.position.latitude = lat
+        e.vehicle.position.longitude = lon
     return e
 
 
@@ -124,3 +128,34 @@ def test_unmatchable_start_date_is_skipped():
                   route_filter=None, archive_dir=None)
     assert n == 0
     assert db.execute("SELECT COUNT(*) FROM observations").fetchone() == (0,)
+
+
+def test_parse_vehicle_position_coordinates():
+    raw = make_feed([vehicle("C", 2, lat=53.3492, lon=-6.2603)])
+    (o,) = parse_feed(raw)
+    assert o["lat"] == pytest.approx(53.3492, abs=1e-4)
+    assert o["lon"] == pytest.approx(-6.2603, abs=1e-4)
+
+
+def test_parse_vehicle_without_position_gives_none():
+    raw = make_feed([vehicle("C", 2)])
+    (o,) = parse_feed(raw)
+    assert o["lat"] is None and o["lon"] is None
+
+
+def test_parse_updates_and_cancels_carry_no_coordinates():
+    raw = make_feed([trip_update("A", max_seq=4), trip_update("B", cancelled=True)])
+    for o in parse_feed(raw):
+        assert o["lat"] is None and o["lon"] is None
+
+
+def test_poll_once_stores_coordinates(tmp_path):
+    db = sqlite3.connect(":memory:")
+    init_store(db)
+    raw = make_feed([vehicle("C", 2, lat=53.3492, lon=-6.2603)])
+    now = dt.datetime(2026, 3, 23, 7, 0, tzinfo=UTC)
+    poll_once(db, fetch_fn=lambda: raw, now_fn=lambda: now,
+              route_filter=None, archive_dir=None)
+    (lat, lon) = db.execute("SELECT lat, lon FROM observations").fetchone()
+    assert lat == pytest.approx(53.3492, abs=1e-4)
+    assert lon == pytest.approx(-6.2603, abs=1e-4)

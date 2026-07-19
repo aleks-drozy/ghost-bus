@@ -76,6 +76,36 @@ def test_observation_roundtrip_with_coordinates(db):
     assert rows == [(None, pytest.approx(53.3036), pytest.approx(-6.2))]
 
 
+def test_observation_roundtrip_with_vehicle_ts(db):
+    record_observation(db, "R1_wk_00", "2026-03-23", T0.isoformat(), "position",
+                       None, 53.3036, -6.2, "2026-03-23T06:59:12+00:00")
+    rows = db.execute("SELECT vehicle_ts FROM observations").fetchall()
+    assert rows == [("2026-03-23T06:59:12+00:00",)]
+
+
+def test_vehicle_ts_defaults_to_null(db):
+    record_observation(db, "R1_wk_00", "2026-03-23", T0.isoformat(), "update", 3)
+    assert db.execute("SELECT vehicle_ts FROM observations").fetchone() == (None,)
+
+
+def test_init_store_migrates_g1_observations():
+    # A DB written by the G1 poller: lat/lon present, no vehicle_ts column.
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE observations (trip_id TEXT, service_date TEXT, "
+                 "ts_utc TEXT, kind TEXT, stop_sequence INTEGER, lat REAL, lon REAL)")
+    conn.execute("INSERT INTO observations VALUES "
+                 "('T1','2026-03-23','2026-03-23T07:00:00+00:00','position',2,53.3,-6.2)")
+    init_store(conn)
+    row = conn.execute(
+        "SELECT trip_id, lat, vehicle_ts FROM observations").fetchone()
+    assert row == ("T1", pytest.approx(53.3), None)  # G1 row intact, vehicle_ts NULL
+    record_observation(conn, "T2", "2026-03-23", T0.isoformat(), "position",
+                       1, 53.3, -6.2, "2026-03-23T06:59:12+00:00")
+    (vts,) = conn.execute(
+        "SELECT vehicle_ts FROM observations WHERE trip_id='T2'").fetchone()
+    assert vts == "2026-03-23T06:59:12+00:00"
+
+
 def test_init_store_migrates_legacy_observations():
     # A DB written by the pre-G1 poller: no lat/lon columns, existing rows.
     conn = sqlite3.connect(":memory:")

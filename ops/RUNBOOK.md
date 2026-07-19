@@ -455,6 +455,16 @@ filled <N>; already had coordinates <N>; no stored observation <N>; ambiguous <N
   fraction of `coordinate pings`, treat that as a feed data-quality finding
   worth its own investigation (or, for the cross-file case, a stray copy in
   the archive tree worth cleaning up), not something to work around here.
+
+  Refused files are still counted in `snapshots read` — they were opened and
+  parsed, only not written from. `snapshots read` plus `unreadable` should
+  always equal the number of `*.pb.zst` files under the archive path; if it
+  does not, that is a bug in this tool, not a data condition.
+
+  Do not leave symlinks or directory junctions inside `state/archive`: the
+  walk would see one physical snapshot under two paths, read them as a
+  cross-file collision, and refuse both. Safe, but it costs real fills for
+  no reason.
 - **unreadable** — snapshot files that failed to decompress or parse (a
   truncated zstd frame, a gateway error page the poller archived before the
   parse guard existed) or whose filename could not be parsed into a

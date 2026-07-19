@@ -384,6 +384,28 @@ def test_cross_file_collision_via_nested_directories_refuses_to_write(tmp_path):
     assert coords(db) == (None, None)
     assert res.ambiguous == 2
     assert (res.filled, res.already_filled) == (0, 0)
+    # Refused files were still opened and parsed, so they must still be counted:
+    # "snapshots read 0; coordinate pings 2" reads as an empty archive, which is
+    # the opposite of the truth in the one case the operator most needs to read.
+    assert res.files == 2
+
+
+def test_refused_collisions_stay_visible_in_the_file_accounting(tmp_path):
+    """files + unreadable must account for every *.pb.zst the walk opened,
+    mixing refused collisions with ordinary snapshots - the invariant an
+    operator triaging against RUNBOOK 7.1 relies on."""
+    db = fresh_db()
+    record_observation(db, "A", "2026-07-18", TS_UTC, "position", 1)
+    archive = tmp_path / "archive"
+    write_snapshot(archive / "x", "20260718", "215141", [vehicle("A", lat=53.1, lon=-6.1)])
+    write_snapshot(archive / "y", "20260718", "215141", [vehicle("A", lat=53.9, lon=-6.9)])
+    for i, sec in enumerate(("215142", "215143", "215144")):
+        write_snapshot(archive, "20260718", sec, [vehicle(f"C{i}", lat=53.5, lon=-6.2)])
+    res = backfill_archive(db, archive, apply=True)
+    on_disk = len(list(archive.rglob("*.pb.zst")))
+    assert res.files + res.unreadable == on_disk == 5
+    assert res.filled + res.already_filled + res.no_row + res.ambiguous == res.pings
+    assert res.ambiguous == 2 and coords(db) == (None, None)
 
 
 def test_cross_file_collision_names_both_paths_on_stderr(tmp_path, capsys):

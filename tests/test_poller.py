@@ -34,7 +34,7 @@ def trip_update(trip_id, start_date="20260323", cancelled=False, max_seq=None):
     return e
 
 
-def vehicle(trip_id, seq, start_date="20260323", lat=None, lon=None):
+def vehicle(trip_id, seq, start_date="20260323", lat=None, lon=None, ts=None):
     e = rt.FeedEntity()
     e.id = f"v-{trip_id}"
     e.vehicle.trip.trip_id = trip_id
@@ -43,6 +43,8 @@ def vehicle(trip_id, seq, start_date="20260323", lat=None, lon=None):
     if lat is not None:
         e.vehicle.position.latitude = lat
         e.vehicle.position.longitude = lon
+    if ts is not None:
+        e.vehicle.timestamp = ts
     return e
 
 
@@ -149,6 +151,31 @@ def test_parse_updates_and_cancels_carry_no_coordinates():
         assert o["lat"] is None and o["lon"] is None
 
 
+def test_parse_vehicle_timestamp_captured():
+    vts = dt.datetime(2026, 3, 23, 6, 59, tzinfo=UTC)
+    raw = make_feed([vehicle("C", 2, ts=int(vts.timestamp()))])
+    (o,) = parse_feed(raw)
+    assert o["vehicle_ts"] == "2026-03-23T06:59:00+00:00"
+
+
+def test_parse_vehicle_without_timestamp_gives_none():
+    raw = make_feed([vehicle("C", 2)])  # unset uint64 reads back as 0
+    (o,) = parse_feed(raw)
+    assert o["vehicle_ts"] is None
+
+
+def test_parse_vehicle_explicit_zero_timestamp_gives_none():
+    raw = make_feed([vehicle("C", 2, ts=0)])  # 1970 epoch is never a real report
+    (o,) = parse_feed(raw)
+    assert o["vehicle_ts"] is None
+
+
+def test_parse_updates_and_cancels_carry_no_vehicle_ts():
+    raw = make_feed([trip_update("A", max_seq=4), trip_update("B", cancelled=True)])
+    for o in parse_feed(raw):
+        assert o["vehicle_ts"] is None
+
+
 def test_poll_once_stores_coordinates(tmp_path):
     db = sqlite3.connect(":memory:")
     init_store(db)
@@ -159,3 +186,18 @@ def test_poll_once_stores_coordinates(tmp_path):
     (lat, lon) = db.execute("SELECT lat, lon FROM observations").fetchone()
     assert lat == pytest.approx(53.3492, abs=1e-4)
     assert lon == pytest.approx(-6.2603, abs=1e-4)
+
+
+def test_poll_once_stores_vehicle_ts():
+    db = sqlite3.connect(":memory:")
+    init_store(db)
+    vts = dt.datetime(2026, 3, 23, 6, 59, tzinfo=UTC)
+    raw = make_feed([vehicle("C", 2, lat=53.3492, lon=-6.2603,
+                             ts=int(vts.timestamp()))])
+    now = dt.datetime(2026, 3, 23, 7, 0, tzinfo=UTC)
+    poll_once(db, fetch_fn=lambda: raw, now_fn=lambda: now,
+              route_filter=None, archive_dir=None)
+    (vehicle_ts, ts_utc) = db.execute(
+        "SELECT vehicle_ts, ts_utc FROM observations").fetchone()
+    assert vehicle_ts == "2026-03-23T06:59:00+00:00"  # vehicle's report, 60 s before poll
+    assert ts_utc == "2026-03-23T07:00:00+00:00"

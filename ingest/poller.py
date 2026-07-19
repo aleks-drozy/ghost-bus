@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sqlite3
+import sys
 import time
 from pathlib import Path
 from typing import Callable
@@ -15,6 +16,18 @@ import zstandard
 from google.transit import gtfs_realtime_pb2 as rt
 
 from classify.store import record_heartbeat, record_observation
+
+# Substrings SQLite actually uses for lock-contention errors (a writer
+# holding the lock past busy_timeout, e.g. timetable.refresh's multi-minute
+# DELETE+reinsert transaction - see ops/RUNBOOK.md 5.3). Deliberately narrow:
+# any other OperationalError (a bad migration, a schema mismatch) must still
+# raise rather than be mistaken for contention.
+_LOCK_MESSAGES = ("database is locked", "database table is locked")
+
+
+def _is_lock_contention(exc: sqlite3.OperationalError) -> bool:
+    msg = str(exc)
+    return any(m in msg for m in _LOCK_MESSAGES)
 
 
 def _service_date(start_date: str) -> str:
@@ -85,15 +98,46 @@ def poll_once(db: sqlite3.Connection, fetch_fn: Callable[[], bytes],
     poll, not a zero-observation success. Observations whose start_date doesn't
     parse to 8 digits are dropped: an unmatchable service key is never mis-keyed
     as "" and silently orphaned from every scheduled trip instead.
+
+    A locked database (e.g. timetable.refresh holding SQLite's write lock for
+    the several minutes a full national stop_times reload takes - RUNBOOK 5.3)
+    is a skipped poll, not a crash: sqlite3.OperationalError from any of the
+    three store writes below is caught and turned into the -1 failed-poll
+    sentinel when it names lock contention, instead of propagating and killing
+    the process (systemd's Restart=always would only re-exec straight back
+    into the same lock, turning one skipped poll into a crash-loop that loses
+    many). No heartbeat is written for a poll that fails this way, so the gap
+    counts honestly as tracker downtime. A lock hit partway through the
+    observation loop is treated the same - the poll is incomplete, so it
+    returns -1 rather than the partial count, even though any observations
+    already committed before the lock hit (record_observation commits per
+    call) legitimately stay in the database. Any OperationalError that is NOT
+    lock contention (e.g. "no such table" from a bad migration) is re-raised
+    unchanged - that class must fail loudly, not be absorbed here.
     """
     now = now_fn()
     try:
         raw = fetch_fn()
         parsed = parse_feed(raw)
     except Exception:
-        record_heartbeat(db, now.isoformat(), False)
+        try:
+            record_heartbeat(db, now.isoformat(), False)
+        except sqlite3.OperationalError as exc:
+            if not _is_lock_contention(exc):
+                raise
+            print(f"poll_once: database locked while recording failed-poll "
+                  f"heartbeat ({exc}) - skipping this poll, gap counts as "
+                  f"tracker downtime", file=sys.stderr)
         return -1
-    record_heartbeat(db, now.isoformat(), True)
+    try:
+        record_heartbeat(db, now.isoformat(), True)
+    except sqlite3.OperationalError as exc:
+        if not _is_lock_contention(exc):
+            raise
+        print(f"poll_once: database locked while recording heartbeat ({exc}) "
+              f"- skipping this poll, gap counts as tracker downtime",
+              file=sys.stderr)
+        return -1
     if archive_dir is not None:
         day_dir = Path(archive_dir) / now.strftime("%Y%m%d")
         day_dir.mkdir(parents=True, exist_ok=True)
@@ -105,9 +149,18 @@ def poll_once(db: sqlite3.Connection, fetch_fn: Callable[[], bytes],
             continue
         if len(obs["start_date"]) != 8 or not obs["start_date"].isdigit():
             continue
-        record_observation(db, obs["trip_id"], _service_date(obs["start_date"]),
-                           now.isoformat(), obs["kind"], obs["stop_sequence"],
-                           obs["lat"], obs["lon"], obs["vehicle_ts"])
+        try:
+            record_observation(db, obs["trip_id"], _service_date(obs["start_date"]),
+                               now.isoformat(), obs["kind"], obs["stop_sequence"],
+                               obs["lat"], obs["lon"], obs["vehicle_ts"])
+        except sqlite3.OperationalError as exc:
+            if not _is_lock_contention(exc):
+                raise
+            print(f"poll_once: database locked while recording an observation "
+                  f"({exc}) - poll incomplete after {count} observation(s) "
+                  f"already written, skipping the rest of this poll",
+                  file=sys.stderr)
+            return -1
         count += 1
     return count
 

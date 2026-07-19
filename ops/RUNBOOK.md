@@ -267,6 +267,27 @@ This sequence starts coordinate capture soonest:
    .venv/bin/python -m timetable.refresh
    ```
 
+   **This runs against the live, actively-polled database, and that is
+   expected — do not stop the poller first.** `timetable.refresh` loads a
+   full national `stop_times` table (~5.9M rows) as one DELETE + reinsert
+   transaction, deliberately atomic so a half-loaded timetable is never
+   visible, and that holds SQLite's write lock for the duration of the
+   reload (minutes, not seconds). For that whole window the poller's own
+   writes will hit "database is locked"; as of the lock-contention fix in
+   `ingest/poller.py`, it now handles this correctly on its own — it logs
+   the condition to stderr and skips the poll instead of crashing, and
+   `systemd` never sees a process death, so there is no restart storm to
+   compound the outage. Each skipped poll shows up as a missing heartbeat,
+   which is honest tracker downtime: any trip observations lost in that
+   window are EXCLUDED from operator statistics rather than counted against
+   the operator, because the gap is the tracker's fault, not theirs. The
+   poller resumes on its own the moment the refresh transaction commits and
+   the lock releases — no operator action needed. (Stopping the poller for
+   the refresh and restarting it afterwards would also be honest, but adds a
+   manual restart step that is easy to forget and would silently extend the
+   downtime indefinitely if missed — strictly worse than the automatic,
+   self-healing skip-and-resume behavior above.)
+
 4. Nothing else to do — `ghostbus-classifier.timer` picks up geographic
    progress on its next scheduled run automatically, no restart required.
    Optional: once burn-in data suggests a better radius than the default,

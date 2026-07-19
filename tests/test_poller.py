@@ -11,6 +11,36 @@ from ingest.poller import parse_feed, poll_once
 UTC = dt.timezone.utc
 
 
+class _LockingDB:
+    """Wraps a real (already-initialized) sqlite3 connection so execute()
+    calls whose SQL contains `block_sql_substr` raise sqlite3.OperationalError
+    once the matching call count reaches `after` (0 = raise on the first
+    matching call). Every other call, and every other attribute, passes
+    straight through to the real connection - this is a store-write-lock
+    stub, not a full sqlite3 fake.
+    """
+
+    def __init__(self, real, block_sql_substr, after=0, message="database is locked"):
+        self._real = real
+        self._block_sql_substr = block_sql_substr
+        self._after = after
+        self._message = message
+        self._matched = 0
+
+    def execute(self, sql, params=()):
+        if self._block_sql_substr in sql:
+            if self._matched >= self._after:
+                raise sqlite3.OperationalError(self._message)
+            self._matched += 1
+        return self._real.execute(sql, params)
+
+    def commit(self):
+        return self._real.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 def make_feed(entities):
     feed = rt.FeedMessage()
     feed.header.gtfs_realtime_version = "2.0"
@@ -220,3 +250,70 @@ def test_poll_once_stores_vehicle_ts():
         "SELECT vehicle_ts, ts_utc FROM observations").fetchone()
     assert vehicle_ts == "2026-03-23T06:59:00+00:00"  # vehicle's report, 60 s before poll
     assert ts_utc == "2026-03-23T07:00:00+00:00"
+
+
+# --- Lock contention (e.g. timetable.refresh holding the write lock, see
+# ops/RUNBOOK.md 5.3) must be a skipped poll, not an uncaught crash that
+# systemd's Restart=always re-execs straight back into the same lock. ---
+
+def test_poll_once_survives_locked_db_on_success_heartbeat(tmp_path, capsys):
+    real = sqlite3.connect(":memory:")
+    init_store(real)
+    db = _LockingDB(real, "INTO heartbeats")
+    raw = make_feed([vehicle("C", 2)])
+    now = dt.datetime(2026, 3, 23, 7, 0, tzinfo=UTC)
+    n = poll_once(db, fetch_fn=lambda: raw, now_fn=lambda: now,
+                  route_filter=None, archive_dir=tmp_path)
+    assert n == -1
+    # No heartbeat written at all for this poll - the gap is honest downtime.
+    assert real.execute("SELECT COUNT(*) FROM heartbeats").fetchone() == (0,)
+    assert "locked" in capsys.readouterr().err.lower()
+
+
+def test_poll_once_survives_locked_db_on_failure_heartbeat(tmp_path, capsys):
+    real = sqlite3.connect(":memory:")
+    init_store(real)
+    db = _LockingDB(real, "INTO heartbeats")
+
+    def boom():
+        raise ConnectionError("api down")
+
+    now = dt.datetime(2026, 3, 23, 7, 0, tzinfo=UTC)
+    n = poll_once(db, fetch_fn=boom, now_fn=lambda: now,
+                  route_filter=None, archive_dir=None)
+    assert n == -1
+    assert real.execute("SELECT COUNT(*) FROM heartbeats").fetchone() == (0,)
+    assert "locked" in capsys.readouterr().err.lower()
+
+
+def test_poll_once_survives_lock_mid_observation_loop(tmp_path, capsys):
+    real = sqlite3.connect(":memory:")
+    init_store(real)
+    # First INSERT INTO observations succeeds, second hits the lock.
+    db = _LockingDB(real, "INTO observations", after=1)
+    raw = make_feed([vehicle("C", 2), vehicle("D", 3)])
+    now = dt.datetime(2026, 3, 23, 7, 0, tzinfo=UTC)
+    n = poll_once(db, fetch_fn=lambda: raw, now_fn=lambda: now,
+                  route_filter=None, archive_dir=None)
+    assert n == -1  # poll is incomplete/failed, not a silent partial success
+    # The one observation that committed before the lock hit stays - that's
+    # honest (it really happened); the return value tells the truth that the
+    # rest of the batch was lost, so nothing downstream mistakes -1 for "0
+    # buses seen".
+    assert real.execute("SELECT COUNT(*) FROM observations").fetchone() == (1,)
+    # Heartbeat was already committed ok=True before the loop started (H2
+    # invariant: heartbeat reflects fetch+parse success, not full ingest).
+    assert real.execute("SELECT ok FROM heartbeats").fetchone() == (1,)
+    assert "locked" in capsys.readouterr().err.lower()
+
+
+def test_poll_once_does_not_swallow_non_lock_operational_error(tmp_path):
+    real = sqlite3.connect(":memory:")
+    init_store(real)
+    db = _LockingDB(real, "INTO heartbeats",
+                     message="no such table: observations")
+    raw = make_feed([vehicle("C", 2)])
+    now = dt.datetime(2026, 3, 23, 7, 0, tzinfo=UTC)
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        poll_once(db, fetch_fn=lambda: raw, now_fn=lambda: now,
+                  route_filter=None, archive_dir=tmp_path)

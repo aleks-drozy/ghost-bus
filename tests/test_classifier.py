@@ -234,3 +234,25 @@ def test_tighter_radius_is_honoured(db):
     geo_obs(db, trip, 25, GEO_COORDS[4][0] - 0.0016, GEO_COORDS[4][1])
     assert classify_trip(db, trip) == "COMPLETED"
     assert classify_trip(db, trip, radius_m=100.0) == "VANISHED"
+
+
+def test_pre_start_pings_do_not_carry_progress(db):
+    # A vehicle keyed to the trip during the 5-min pre-window near the LAST
+    # stop (layover/depot case) must not make a never-run trip COMPLETED.
+    trip = make_trip(n_stops=5)
+    beat_window(db, trip)
+    geo_timetable(db)
+    geo_obs(db, trip, -3, *GEO_COORDS[4])  # 3 min before scheduled start
+    assert classify_trip(db, trip) == "VANISHED"
+
+
+def test_geo_evidence_cannot_lower_feed_progress(db):
+    # Feed seq says the final stop (progress 1.0); a geo ping sits back at
+    # stop 1. Max-merge must keep 1.0 -> COMPLETED. A geo-replaces-feed bug
+    # would compute 0.2 with an early last ping -> VANISHED.
+    trip = make_trip(n_stops=5)
+    beat_window(db, trip)
+    geo_timetable(db)
+    obs(db, trip, 25, 5)
+    geo_obs(db, trip, 26, *GEO_COORDS[0])
+    assert classify_trip(db, trip) == "COMPLETED"

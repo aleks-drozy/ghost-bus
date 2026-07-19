@@ -38,9 +38,10 @@ def refresh(db: sqlite3.Connection, fetch_fn: Callable[[], bytes],
 def main() -> int:  # pragma: no cover
     import requests
 
+    from ghostbus_config import get_db
+
     db_path = Path(os.environ.get("GHOSTBUS_DB", "state/ghostbus.db"))
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(db_path)
+    db = get_db()
 
     def fetch() -> bytes:
         resp = requests.get(GTFS_STATIC_ZIP_URL, timeout=120)

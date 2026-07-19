@@ -47,10 +47,19 @@ of the trip's own scheduled stops, and counts only if it lies within
 `GHOSTBUS_MATCH_RADIUS_M` metres (default 250). Progress is the furthest
 matched stop's sequence over the trip's final sequence. Feed-supplied
 stop_sequence values, if they ever appear, still count - the two evidence
-sources merge by taking the maximum. Geographic evidence can only raise
-progress; it cannot create a ghost. Off-route pings match nothing and
-contribute nothing, and equidistant matches credit the lower sequence -
-progress is never over-credited.
+sources merge by taking the maximum. Only pings at or after the scheduled
+start carry progress; pre-start pings (e.g. a vehicle keyed to the trip
+during a depot layover) prove existence but cannot complete a trip. Off-route
+pings match nothing and contribute nothing.
+
+Geographic evidence can only raise progress; it cannot create a ghost.
+Matching errors are therefore one-directional: they can inflate progress and
+mask a ghost, never fabricate one. The equidistant tie-break (lower sequence
+wins) defends exact duplicate coordinates only, not near-ties - on a loop
+route whose outbound and return stops sit close together, a ping drifted
+toward the return stop can credit the higher sequence. We do not claim
+progress is never over-credited; we claim over-crediting can only mask a
+real ghost, never manufacture a fake one.
 
 ## The tracker grades itself
 
@@ -114,9 +123,13 @@ starts seeing the live feed instead of fixtures.
   not distinguish, say, "Tuesdays at 5pm" from every day at 5pm ever
   observed.
 - **Nearest-stop matching is coarse** (G1): two physically close stops
-  (loops, opposite roadsides) can credit the wrong sequence. At the
-  75%/90% thresholds this is noise rather than systematic bias; the
-  burn-in quantifies the geo-match rate before any number is published.
+  (loops, opposite roadsides) can credit the wrong sequence. On ordinary
+  routes this is noise around the 75%/90% thresholds; on loop-shaped routes,
+  where outbound and return stops sit close together, the near-tie error is
+  systematic rather than random, and it is always operator-flattering (it
+  can only raise progress). Burn-in must quantify per-route geo-max-sequence
+  distributions - loop routes specifically - alongside the overall geo-match
+  rate before any number is published.
 
 ## Architecture
 

@@ -21,6 +21,23 @@ def _service_date(start_date: str) -> str:
     return f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}" if len(start_date) == 8 else start_date
 
 
+def _vehicle_ts(timestamp: int) -> str | None:
+    """The vehicle's own report time as ISO-8601 UTC, or None if unusable.
+
+    timestamp is uint64 POSIX seconds; 0 (the proto default) means the vehicle
+    sent no report time - a genuine 1970 report is impossible. Values outside
+    datetime's range are corrupt, and this field is measurement-only: degrade it
+    to None rather than let it raise, which poll_once would otherwise catch as a
+    failed poll and drop the whole batch of real positions with it.
+    """
+    if not timestamp:
+        return None
+    try:
+        return dt.datetime.fromtimestamp(timestamp, tz=dt.timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def parse_feed(raw: bytes) -> list[dict]:
     feed = rt.FeedMessage()
     feed.ParseFromString(raw)
@@ -47,16 +64,12 @@ def parse_feed(raw: bytes) -> list[dict]:
         elif entity.HasField("vehicle"):
             v = entity.vehicle
             has_pos = v.HasField("position")
-            # v.timestamp is uint64 POSIX seconds; 0 (the proto default) means the
-            # vehicle sent no report time - a real 1970 report is impossible.
             out.append({"trip_id": v.trip.trip_id, "kind": "position",
                         "stop_sequence": v.current_stop_sequence if v.HasField("current_stop_sequence") else None,
                         "start_date": v.trip.start_date,
                         "lat": v.position.latitude if has_pos else None,
                         "lon": v.position.longitude if has_pos else None,
-                        "vehicle_ts": dt.datetime.fromtimestamp(
-                            v.timestamp, tz=dt.timezone.utc).isoformat()
-                        if v.timestamp else None})
+                        "vehicle_ts": _vehicle_ts(v.timestamp)})
     return out
 
 

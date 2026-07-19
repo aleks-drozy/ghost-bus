@@ -38,6 +38,20 @@ of the doubt.
 **Headline metric:** ghost rate = (UNTRACKED + VANISHED) / (scheduled − EXCLUDED),
 per route, per hour-of-day, per day.
 
+### Spec amendment G1 (2026-07-19): geographic progress
+
+The NTA VehiclePositions feed never populates `current_stop_sequence`
+(0/666 vehicles in the 2026-07-18 live probe), so route progress is now
+measured geographically: each vehicle GPS ping is matched to the *nearest*
+of the trip's own scheduled stops, and counts only if it lies within
+`GHOSTBUS_MATCH_RADIUS_M` metres (default 250). Progress is the furthest
+matched stop's sequence over the trip's final sequence. Feed-supplied
+stop_sequence values, if they ever appear, still count - the two evidence
+sources merge by taking the maximum. Geographic evidence can only raise
+progress; it cannot create a ghost. Off-route pings match nothing and
+contribute nothing, and equidistant matches credit the lower sequence -
+progress is never over-credited.
+
 ## The tracker grades itself
 
 EXCLUDED exists because a gap in *our* polling looks identical, from the
@@ -99,6 +113,10 @@ starts seeing the live feed instead of fixtures.
 - **Hour-of-day statistics pool across dates** — the route/hour rollup does
   not distinguish, say, "Tuesdays at 5pm" from every day at 5pm ever
   observed.
+- **Nearest-stop matching is coarse** (G1): two physically close stops
+  (loops, opposite roadsides) can credit the wrong sequence. At the
+  75%/90% thresholds this is noise rather than systematic bias; the
+  burn-in quantifies the geo-match rate before any number is published.
 
 ## Architecture
 

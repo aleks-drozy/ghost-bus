@@ -8,7 +8,7 @@ import sqlite3
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS observations (
   trip_id TEXT, service_date TEXT, ts_utc TEXT, kind TEXT, stop_sequence INTEGER,
-  lat REAL, lon REAL);
+  lat REAL, lon REAL, vehicle_ts TEXT);
 CREATE INDEX IF NOT EXISTS idx_obs_trip ON observations(trip_id, service_date);
 CREATE TABLE IF NOT EXISTS heartbeats (ts_utc TEXT PRIMARY KEY, ok INTEGER);
 """
@@ -24,7 +24,8 @@ def _ensure_columns(db: sqlite3.Connection, table: str, columns: dict[str, str])
 
 def init_store(db: sqlite3.Connection) -> None:
     db.executescript(_SCHEMA)
-    _ensure_columns(db, "observations", {"lat": "REAL", "lon": "REAL"})
+    _ensure_columns(db, "observations",
+                    {"lat": "REAL", "lon": "REAL", "vehicle_ts": "TEXT"})
     db.commit()
 
 
@@ -35,13 +36,14 @@ def record_heartbeat(db: sqlite3.Connection, ts_utc: str, ok: bool) -> None:
 
 def record_observation(db: sqlite3.Connection, trip_id: str, service_date: str,
                        ts_utc: str, kind: str, stop_sequence: int | None = None,
-                       lat: float | None = None, lon: float | None = None) -> None:
+                       lat: float | None = None, lon: float | None = None,
+                       vehicle_ts: str | None = None) -> None:
     if kind not in ("position", "update", "cancel"):
         raise ValueError(f"unknown observation kind {kind!r}")
     db.execute("INSERT INTO observations "
-               "(trip_id, service_date, ts_utc, kind, stop_sequence, lat, lon) "
-               "VALUES (?,?,?,?,?,?,?)",
-               (trip_id, service_date, ts_utc, kind, stop_sequence, lat, lon))
+               "(trip_id, service_date, ts_utc, kind, stop_sequence, lat, lon, vehicle_ts) "
+               "VALUES (?,?,?,?,?,?,?,?)",
+               (trip_id, service_date, ts_utc, kind, stop_sequence, lat, lon, vehicle_ts))
     db.commit()
 
 

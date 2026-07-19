@@ -226,3 +226,44 @@ find /opt/ghost-bus/data -name '*.pb.zst' -mtime +7 -print -delete
 ```
 
 Drop `-delete` first to dry-run and confirm the file list before deleting.
+
+---
+
+## 5. Upgrade to geographic progress (G1, 2026-07-19)
+
+Deploys the spec amendment described in the README's Methodology section:
+route progress is now measured by matching vehicle GPS to the trip's
+nearest scheduled stop, in addition to feed `stop_sequence`. Order-
+independent — each step below degrades gracefully until the others have
+run — but this sequence starts coordinate capture soonest:
+
+1. Pull the update:
+
+   ```bash
+   cd /opt/ghost-bus && git pull
+   ```
+
+2. Restart the poller — `init_store` adds the `lat`/`lon` columns to
+   `observations` on startup, so pings only carry coordinates from this
+   moment on:
+
+   ```bash
+   sudo systemctl restart ghostbus-poller.service
+   ```
+
+3. Run the timetable refresh once (step 4.2 above) to load stop
+   coordinates, `stop_id`s, and route display names — geographic matching
+   has no stops to match against until this has run at least once:
+
+   ```bash
+   cd /opt/ghost-bus
+   .venv/bin/python -m timetable.refresh
+   ```
+
+4. Nothing else to do — `ghostbus-classifier.timer` picks up geographic
+   progress on its next scheduled run automatically, no restart required.
+   Optional: once burn-in data suggests a better radius than the default,
+   set `GHOSTBUS_MATCH_RADIUS_M` in `/etc/ghostbus.env` (metres, default
+   `250`) — the classifier is a `oneshot` unit and rereads the env file
+   fresh on every run, so no service restart is needed for this to take
+   effect either.

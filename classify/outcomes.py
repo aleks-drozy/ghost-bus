@@ -3,7 +3,9 @@
 EXCLUDED   tracker uptime < 90% of the trip window (our fault, not the operator's)
 CANCELLED  feed marked the trip CANCELED during the window
 COMPLETED  progress >= 90% of stops OR last observation within 10 min of scheduled end
+           (progress = feed stop_sequence UNION geographic nearest-stop matching, G1)
 VANISHED   observed, then silent with progress < 75% and > 15 min still to run
+           (progress = feed stop_sequence UNION geographic nearest-stop matching, G1)
 UNTRACKED  no VEHICLE observation in the window (TripUpdate predictions alone do
            not prove a bus exists - predictions-without-a-vehicle is exactly the
            commuter's ghost)
@@ -13,6 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import sqlite3
 
+from classify.progress import matched_max_seq
 from classify.store import uptime
 from timetable.gtfs import ScheduledTrip
 
@@ -25,22 +28,44 @@ CREATE TABLE IF NOT EXISTS trip_outcomes (
 """
 
 
-def classify_trip(db: sqlite3.Connection, trip: ScheduledTrip) -> str:
+def _trip_stop_coords(db: sqlite3.Connection, trip_id: str) -> list[tuple[int, float, float]]:
+    try:
+        return db.execute(
+            "SELECT st.stop_sequence, s.lat, s.lon FROM gtfs_stop_times st "
+            "JOIN gtfs_stops s ON s.stop_id = st.stop_id WHERE st.trip_id=?",
+            (trip_id,)).fetchall()
+    except sqlite3.OperationalError:
+        # Pre-refresh database (no gtfs_stops table / stop_id column yet):
+        # geographic evidence is simply unavailable, never an error - progress
+        # falls back to feed stop_sequence alone, i.e. pre-G1 behavior.
+        return []
+
+
+def classify_trip(db: sqlite3.Connection, trip: ScheduledTrip,
+                  radius_m: float = 250.0) -> str:
     if uptime(db, trip.window_start_utc, trip.window_end_utc) < 0.90:
         return "EXCLUDED"
     rows = db.execute(
-        "SELECT ts_utc, kind, stop_sequence FROM observations "
+        "SELECT ts_utc, kind, stop_sequence, lat, lon FROM observations "
         "WHERE trip_id=? AND service_date=? AND ts_utc>=? AND ts_utc<? ORDER BY ts_utc",
         (trip.trip_id, str(trip.service_date),
          trip.window_start_utc.isoformat(), trip.window_end_utc.isoformat())).fetchall()
-    if any(kind == "cancel" for _, kind, _ in rows):
+    if any(kind == "cancel" for _, kind, _, _, _ in rows):
         return "CANCELLED"
-    tracked = [(ts, seq) for ts, kind, seq in rows if kind == "position"]
+    tracked = [(ts, seq, lat, lon) for ts, kind, seq, lat, lon in rows if kind == "position"]
     if not tracked:
         return "UNTRACKED"
     # Parse before comparing - string order breaks if timestamp formats ever vary.
-    last_ts = max(dt.datetime.fromisoformat(ts) for ts, _ in tracked)
-    seqs = [seq for _, seq in tracked if seq is not None]
+    last_ts = max(dt.datetime.fromisoformat(ts) for ts, _, _, _ in tracked)
+    seqs = [seq for _, seq, _, _ in tracked if seq is not None]
+    # Geographic evidence (amendment G1): GPS pings matched to the trip's own
+    # scheduled stops. Merges with feed stop_sequence by max - it can only
+    # RAISE progress, never lower it or affect any other class.
+    pings = [(lat, lon) for _, _, lat, lon in tracked if lat is not None and lon is not None]
+    if pings:
+        geo_seq = matched_max_seq(_trip_stop_coords(db, trip.trip_id), pings, radius_m)
+        if geo_seq is not None:
+            seqs.append(geo_seq)
     # GTFS stop_sequence need not be contiguous, so the denominator is the trip's
     # own max scheduled sequence, clamped defensively.
     progress = min(1.0, max(seqs) / trip.max_stop_seq) if seqs else 0.0
@@ -54,13 +79,13 @@ def classify_trip(db: sqlite3.Connection, trip: ScheduledTrip) -> str:
 
 
 def classify_day(db: sqlite3.Connection, trips: list[ScheduledTrip],
-                 now_utc: dt.datetime) -> dict[str, str]:
+                 now_utc: dt.datetime, radius_m: float = 250.0) -> dict[str, str]:
     db.executescript(_OUTCOMES_SCHEMA)
     results: dict[str, str] = {}
     for trip in trips:
         if trip.window_end_utc > now_utc:
             continue
-        outcome = classify_trip(db, trip)
+        outcome = classify_trip(db, trip, radius_m)
         results[trip.trip_id] = outcome
         db.execute("INSERT OR REPLACE INTO trip_outcomes VALUES (?,?,?,?,?)",
                    (trip.trip_id, str(trip.service_date), trip.route_id,

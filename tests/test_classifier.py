@@ -148,3 +148,89 @@ def test_progress_with_non_contiguous_stop_sequences(db):
     beat_window(db, trip2)
     obs(db, trip2, 55, 50)  # final stop -> progress 1.0
     assert classify_trip(db, trip2) == "COMPLETED"
+
+
+# 5 stops 400.3 m apart on a meridian, same geometry as Fixtureville.
+GEO_COORDS = [(53.3000 + 0.0036 * i, -6.2000) for i in range(5)]
+
+
+def geo_timetable(db, trip_id="T1", coords=GEO_COORDS):
+    db.executescript(
+        "CREATE TABLE IF NOT EXISTS gtfs_stop_times "
+        "(trip_id TEXT, stop_sequence INTEGER, dep_seconds INTEGER, stop_id TEXT);"
+        "CREATE TABLE IF NOT EXISTS gtfs_stops (stop_id TEXT PRIMARY KEY, lat REAL, lon REAL);")
+    for seq, (lat, lon) in enumerate(coords, start=1):
+        sid = f"{trip_id}_{seq}"
+        db.execute("INSERT INTO gtfs_stop_times VALUES (?,?,?,?)", (trip_id, seq, 0, sid))
+        db.execute("INSERT OR REPLACE INTO gtfs_stops VALUES (?,?,?)", (sid, lat, lon))
+
+
+def geo_obs(db, trip, minutes_after_start, lat, lon):
+    record_observation(db, trip.trip_id, str(DAY),
+                       (trip.start_utc + dt.timedelta(minutes=minutes_after_start)).isoformat(),
+                       "position", None, lat, lon)
+
+
+def test_geo_completed_via_progress_branch(db):
+    # Pings walk all 5 stops but the LAST ping is 30 min before scheduled end,
+    # so the within-10-min-of-end time branch cannot fire: only geographic
+    # progress (5/5 >= 0.90) can produce COMPLETED here.
+    trip = make_trip(n_stops=5)
+    beat_window(db, trip)
+    geo_timetable(db)
+    for i in range(5):
+        geo_obs(db, trip, 5 + i * 6, *GEO_COORDS[i])  # minutes 5..29
+    assert classify_trip(db, trip) == "COMPLETED"
+
+
+def test_geo_vanished_early_silence(db):
+    # Pings near stops 1-2 only (progress 0.4 < 0.75), silence from minute 15.
+    trip = make_trip(n_stops=5)
+    beat_window(db, trip)
+    geo_timetable(db)
+    geo_obs(db, trip, 5, *GEO_COORDS[0])
+    geo_obs(db, trip, 15, *GEO_COORDS[1])
+    assert classify_trip(db, trip) == "VANISHED"
+
+
+def test_geo_off_route_pings_do_not_complete(db):
+    # All pings far from every stop: no geo evidence, last ping early -> VANISHED
+    # ... except progress is 0 < 0.75 and silence > 15 min, so VANISHED. An
+    # implementation that snapped pings to the nearest stop regardless of radius
+    # would instead reach COMPLETED via fabricated progress.
+    trip = make_trip(n_stops=5)
+    beat_window(db, trip)
+    geo_timetable(db)
+    geo_obs(db, trip, 5, 53.5000, -6.9000)
+    geo_obs(db, trip, 20, 53.5010, -6.9000)
+    assert classify_trip(db, trip) == "VANISHED"
+
+
+def test_geo_query_survives_pre_refresh_db(db):
+    # Coordinates present on observations but NO gtfs tables at all (live DB
+    # between deploy and the first timetable refresh): must not crash, must
+    # fall back to exactly the pre-G1 behavior.
+    trip = make_trip(n_stops=5)
+    beat_window(db, trip)
+    geo_obs(db, trip, 15, 53.3036, -6.2000)
+    assert classify_trip(db, trip) == "VANISHED"
+
+
+def test_geo_and_seq_evidence_merge_by_max(db):
+    # Feed seq says stop 1 (0.2); geo ping sits at stop 5 -> progress 1.0.
+    trip = make_trip(n_stops=5)
+    beat_window(db, trip)
+    geo_timetable(db)
+    obs(db, trip, 5, 1)
+    geo_obs(db, trip, 25, *GEO_COORDS[4])
+    assert classify_trip(db, trip) == "COMPLETED"
+
+
+def test_tighter_radius_is_honoured(db):
+    # Ping 177.9 m from stop 5: matches at the 250 m default, not at 100 m.
+    trip = make_trip(n_stops=5)
+    beat_window(db, trip)
+    geo_timetable(db)
+    geo_obs(db, trip, 25, GEO_COORDS[4][0] - 0.0016, GEO_COORDS[4][1])
+    assert classify_trip(db, trip) == "COMPLETED"
+    assert classify_trip(db, trip, radius_m=100.0) == "VANISHED"

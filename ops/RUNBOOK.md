@@ -424,24 +424,34 @@ filled <N>; already had coordinates <N>; no stored observation <N>; ambiguous <N
   that got archived but whose parse the live poller itself skipped for an
   unrelated reason); a number close to **coordinate pings** means the join
   key is broken and the run needs to stop before `--apply`.
-- **ambiguous** — pings whose join key matched *more than one* stored row.
-  This means two vehicles reported the same `trip_id` in the same snapshot;
-  this tool's key (`trip_id`, `service_date`, second-resolution `ts_utc`)
-  cannot tell them apart, and writing anyway would risk pinning one
-  vehicle's real coordinates onto the other's row — a wrong coordinate,
-  which is worse than the missing one this tool exists to fix. Neither
-  candidate row is touched, and this counter is where that fact stays
-  visible instead of being silently absorbed into "already had
-  coordinates". **A nonzero `ambiguous` count is not a bug in this tool —
-  it is the tool refusing to guess.** It should stay small; if it is a
-  large fraction of `coordinate pings`, treat that as a feed data-quality
-  finding worth its own investigation, not something to work around here.
+- **ambiguous** — pings whose join key is not unique. Most commonly, *two or
+  more pings in the same snapshot* share a key — two vehicles reported the
+  same `trip_id` in the same poll, and this tool's key (`trip_id`,
+  `service_date`, second-resolution `ts_utc`) cannot tell them apart. Rarer:
+  a single ping's key matches more than one stored row already in
+  `observations`. Either way, writing would risk pinning one vehicle's real
+  coordinates onto the wrong row — a wrong coordinate, which is worse than
+  the missing one this tool exists to fix — so none of the colliding
+  candidates are touched. This is deliberately independent of how many
+  stored rows currently exist for the key: an interrupted poll can leave the
+  archive ahead of the database (see "no stored observation" above), and a
+  guard that only looked at stored-row count would let the first of two
+  colliding pings write, then silently absorb the second into "already had
+  coordinates" once its probe saw the first one's own update. This counter
+  is where the collision stays visible instead. **A nonzero `ambiguous`
+  count is not a bug in this tool — it is the tool refusing to guess.** It
+  should stay small; if it is a large fraction of `coordinate pings`, treat
+  that as a feed data-quality finding worth its own investigation, not
+  something to work around here.
 - **unreadable** — snapshot files that failed to decompress or parse (a
   truncated zstd frame, a gateway error page the poller archived before the
-  parse guard existed, or an unrecognisable filename). Each one is printed
-  to stderr with the file path and the exception repr as it's counted, so a
-  spike here is diagnosable rather than an opaque number — check whether
-  it's a handful of known-corrupt files (fine) or a new failure mode (not
+  parse guard existed) or whose filename could not be parsed into a
+  timestamp at all. Each one is printed to stderr with the file path as
+  it's counted — the decompress/parse failures also include the exception
+  repr, the unrecognisable-filename case states plainly that the filename
+  couldn't be parsed — so a spike here is diagnosable rather than an opaque
+  number — check whether it's a handful of known-corrupt files (fine) or a
+  new failure mode (not
   fine, look at the printed exceptions).
 
 ### 7.2 Safety

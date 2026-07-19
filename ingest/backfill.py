@@ -110,13 +110,21 @@ class Counts:
                      vehicle_ts - that must converge to "nothing to do", not
                      stay "fillable" forever)
     no_row           pings with no stored observation at all to attach to
-    ambiguous        pings whose key matched more than one stored row. Two
-                     vehicles reporting the same trip_id in one snapshot are
-                     indistinguishable by this tool's join key, so neither
-                     candidate row is written - a wrong coordinate is worse
-                     than a missing one, and this count is how that stays
-                     visible instead of being silently folded into
-                     already_filled.
+    ambiguous        pings whose join key is not unique - either two or more
+                     pings in this same snapshot share a key, or (rarer) a
+                     single ping's key matches more than one stored row.
+                     Two vehicles reporting the same trip_id in one snapshot
+                     are indistinguishable by this tool's join key, so
+                     neither candidate is written. This is deliberately
+                     independent of stored-row count: with one stored row
+                     and two same-key pings, writing the first would make
+                     the second's probe see the first's own UPDATE and look
+                     like "already filled", silently discarding a genuinely
+                     distinct GPS reading. Grouping by the snapshot itself
+                     - before any probe or write - closes that hole. A
+                     wrong coordinate is worse than a missing one, and this
+                     count is how that stays visible instead of being
+                     silently folded into already_filled.
     """
 
     files: int = 0
@@ -143,6 +151,14 @@ def backfill_file(db: sqlite3.Connection, raw: bytes, ts_prefix: str,
     """
     res = Counts(files=1)
     probe_sql, update_sql = _build_sql(fill_columns)
+
+    # Group every usable ping by its join key BEFORE any probe or write.
+    # Ambiguity has to be decided from the snapshot itself, not from
+    # stored-row count: probing and writing ping-by-ping let an earlier
+    # entity's own UPDATE make a later entity's distinct ping look like
+    # "already filled" on its probe, which silently discarded a genuinely
+    # different GPS reading with no ambiguous counter and no stderr.
+    groups: dict[tuple[str, str, str], list[dict]] = {}
     for obs in parse_feed(raw):
         if obs["kind"] != "position" or obs["lat"] is None:
             continue
@@ -152,15 +168,26 @@ def backfill_file(db: sqlite3.Connection, raw: bytes, ts_prefix: str,
             continue
         res.pings += 1
         key = (obs["trip_id"], _service_date(obs["start_date"]), ts_prefix)
+        groups.setdefault(key, []).append(obs)
+
+    for key, pings in groups.items():
+        if len(pings) > 1:
+            # Two or more pings in this snapshot share this key - two
+            # vehicles reported this trip_id in this poll and the key can't
+            # tell them apart. Refuse to guess for any of them, regardless
+            # of how many stored rows currently match.
+            res.ambiguous += len(pings)
+            continue
+        obs = pings[0]
         rows = db.execute(probe_sql, key).fetchall()
         if len(rows) == 0:
             res.no_row += 1
             continue
         if len(rows) > 1:
-            # More than one stored row matches this key - two vehicles
-            # reported this trip_id in this snapshot and the key can't tell
-            # them apart. Writing here would risk pinning one entity's real
-            # coordinates onto the wrong physical row. Refuse to guess.
+            # The snapshot only carried one ping for this key, but more than
+            # one stored row matches it anyway. Writing here would risk
+            # pinning this entity's real coordinates onto the wrong physical
+            # row. Refuse to guess.
             res.ambiguous += 1
             continue
         # A column is worth writing only if it's currently NULL *and* this
@@ -224,6 +251,12 @@ def backfill_archive(db: sqlite3.Connection, archive_dir: Path, apply: bool,
             continue
         ts_prefix = ts_prefix_from_path(path)
         if ts_prefix is None:
+            # Same stderr contract as the zstd/parse failure path below: the
+            # path and why it can't be used, so an operator following
+            # RUNBOOK 7.1 after an unreadable spike finds a real diagnosis
+            # instead of empty stderr.
+            print(f"unreadable snapshot {path}: unrecognisable filename, "
+                  f"could not parse a timestamp from it", file=sys.stderr)
             total.unreadable += 1
             continue
         try:

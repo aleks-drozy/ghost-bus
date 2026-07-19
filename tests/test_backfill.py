@@ -186,6 +186,40 @@ def test_ordinary_single_match_still_writes_correctly_alongside_ambiguity_guard(
     assert (res.filled, res.ambiguous) == (1, 0)
 
 
+def test_one_stored_row_two_entities_sharing_key_is_ambiguous_not_guessed():
+    """The ambiguity guard must key off the SNAPSHOT, not stored-row count.
+    Only one stored row exists for trip "A", but the snapshot itself carries
+    two distinct pings for that same join key - a crash/OOM-kill mid-poll
+    (RUNBOOK 7.1's "no stored observation" case, mirrored here) can leave
+    the archive ahead of the DB, so rows < entities is a real state. The old
+    row-count-only guard let entity 1 write, after which entity 2's probe
+    saw entity 1's own UPDATE and got folded into "already_filled" - a
+    genuinely distinct GPS reading silently discarded with no ambiguous
+    counter and no stderr. Neither entity may be written; both must count
+    as ambiguous."""
+    db = fresh_db()
+    record_observation(db, "A", "2026-07-18", TS_UTC, "position", 1)
+    res = backfill_file(db, make_feed([vehicle("A", lat=53.1, lon=-6.1),
+                                       vehicle("A", lat=53.9, lon=-6.9)]),
+                        TS_PREFIX, apply=True)
+    assert coords(db) == (None, None)
+    assert res.ambiguous == 2
+    assert (res.filled, res.already_filled) == (0, 0)
+
+
+def test_zero_stored_rows_two_entities_sharing_key_is_ambiguous_not_a_crash():
+    """No stored row at all for the key, but the snapshot still carries two
+    pings that collide on it. Must not crash, and must still be counted as
+    ambiguous rather than no_row - there is genuinely no way to tell which
+    entity a future row would belong to."""
+    db = fresh_db()
+    res = backfill_file(db, make_feed([vehicle("A", lat=53.1, lon=-6.1),
+                                       vehicle("A", lat=53.9, lon=-6.9)]),
+                        TS_PREFIX, apply=True)
+    assert res.ambiguous == 2
+    assert (res.filled, res.already_filled, res.no_row) == (0, 0, 0)
+
+
 # --- archive walk -----------------------------------------------------------
 
 def write_snapshot(archive, day, hhmmss, entities):
@@ -253,14 +287,21 @@ def test_stray_file_with_unparseable_name_is_skipped(tmp_path):
     assert (res.files, res.unreadable) == (0, 0)
 
 
-def test_snapshot_with_undecodable_name_is_counted_not_guessed(tmp_path):
+def test_snapshot_with_undecodable_name_is_counted_not_guessed(tmp_path, capsys):
+    """RUNBOOK 7.1 promises every unreadable snapshot - including one with
+    an unrecognisable filename - is printed to stderr with its path. Assert
+    on the actual captured stderr, not just the counter, so the docs and
+    the code can't silently drift apart again."""
     db = fresh_db()
     archive = tmp_path / "archive"
     (archive / "20260718").mkdir(parents=True)
-    (archive / "20260718" / "2151.pb.zst").write_bytes(
-        zstandard.ZstdCompressor().compress(make_feed([vehicle("A")])))
+    bad = archive / "20260718" / "2151.pb.zst"
+    bad.write_bytes(zstandard.ZstdCompressor().compress(make_feed([vehicle("A")])))
     res = backfill_archive(db, archive, apply=True)
     assert (res.unreadable, res.files, res.filled) == (1, 0, 0)
+    err = capsys.readouterr().err
+    assert bad.name in err
+    assert "filename" in err
 
 
 def test_files_are_visited_in_chronological_order(tmp_path):

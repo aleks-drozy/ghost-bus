@@ -338,8 +338,12 @@ def backfill_archive(db: sqlite3.Connection, archive_dir: Path, apply: bool,
                 print(f"unreadable snapshot {path}: {exc!r}", file=sys.stderr)
                 total.unreadable += 1
                 continue
-            total.pings += n
-            total.ambiguous += n
+            # Counted as a snapshot read like any other: we decompressed and
+            # parsed it. Leaving files out here made "snapshots read 0;
+            # coordinate pings 2" reachable, which reads as an empty archive -
+            # the opposite of the truth, in the one case the operator most
+            # needs to understand.
+            total += Counts(files=1, pings=n, ambiguous=n)
             if progress_fn is not None:
                 progress_fn(path, total)
             continue

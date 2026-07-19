@@ -71,7 +71,13 @@ def test_ts_prefix_malformed_returns_none(tmp_path):
                       ("20260718", "256161.pb.zst"),     # invalid hh/mm/ss
                       ("20261318", "215141.pb.zst"),      # invalid month
                       ("20260718", "2151.pb.zst"),        # strptime would backtrack
-                      ("20260718", "٢١٥١٤١.pb.zst")]:     # non-ascii digits
+                      ("20260718", "٢١٥١٤١.pb.zst"),      # non-ascii digits
+                      ("20260718", "215141.bak.pb.zst"),  # Finding F1(b): stale-copy
+                                                           # suffix before .pb.zst - must
+                                                           # NOT resolve to the same
+                                                           # prefix as the real file
+                      ("20260718", "215141.1.pb.zst"),    # numbered-copy suffix, same reason
+                      ("20260718", "215141.tmp.pb.zst")]:  # in-progress-write suffix, same reason
         assert ts_prefix_from_path(a / day / name) is None
 
 
@@ -353,6 +359,106 @@ def test_round_trip_against_the_real_poller(tmp_path):
     assert (res.files, res.pings, res.filled, res.no_row) == (1, 2, 2, 0)
     assert coords(db, "A")[0] == pytest.approx(53.3, abs=1e-4)
     assert coords(db, "B")[1] == pytest.approx(-6.30, abs=1e-4)
+
+
+# --- cross-file key collisions (Finding F1) ----------------------------------
+#
+# ts_prefix is constant per file, so two files can only share a join key if
+# they share a ts_prefix. v3 rebuilt its ping-grouping dict inside
+# backfill_file, called once per file, so it only ever saw collisions WITHIN
+# one snapshot. Two files that key to the same second - via a nested subtree
+# (F1a) or a stray suffix ts_prefix_from_path used to swallow (F1b) - sailed
+# straight past every guard and reproduced the original corruption.
+
+def test_cross_file_collision_via_nested_directories_refuses_to_write(tmp_path):
+    """F1(a): rglob is recursive but ts_prefix_from_path only reads
+    path.parent.name, so archive/a/20260718/215141.pb.zst and
+    archive/b/20260718/215141.pb.zst both key to the same (trip_id,
+    service_date, ts_prefix). Neither vehicle's ping may be written."""
+    db = fresh_db()
+    record_observation(db, "A", "2026-07-18", TS_UTC, "position", 1)
+    archive = tmp_path / "archive"
+    write_snapshot(archive / "a", "20260718", "215141", [vehicle("A", lat=53.1, lon=-6.1)])
+    write_snapshot(archive / "b", "20260718", "215141", [vehicle("A", lat=53.9, lon=-6.9)])
+    res = backfill_archive(db, archive, apply=True)
+    assert coords(db) == (None, None)
+    assert res.ambiguous == 2
+    assert (res.filled, res.already_filled) == (0, 0)
+
+
+def test_cross_file_collision_names_both_paths_on_stderr(tmp_path, capsys):
+    db = fresh_db()
+    record_observation(db, "A", "2026-07-18", TS_UTC, "position", 1)
+    archive = tmp_path / "archive"
+    p1 = write_snapshot(archive / "a", "20260718", "215141", [vehicle("A", lat=53.1, lon=-6.1)])
+    p2 = write_snapshot(archive / "b", "20260718", "215141", [vehicle("A", lat=53.9, lon=-6.9)])
+    backfill_archive(db, archive, apply=True)
+    err = capsys.readouterr().err
+    assert str(p1) in err
+    assert str(p2) in err
+
+
+def test_stale_backup_suffix_no_longer_poisons_the_authoritative_snapshot(tmp_path):
+    """F1(b) end-to-end, the exact repro from the finding: a stale .bak copy
+    used to sort before the real file (sorted() places ".bak" before ".pb")
+    and silently overwrite it with the wrong coordinates, while both the
+    summary and a second --apply looked exactly like a clean run. With the
+    filename validated in full, the .bak file is now rejected up front as an
+    unreadable/unparseable filename rather than being decoded and treated as
+    a same-key duplicate - so the authoritative file's ping is the only one
+    ever considered, and its real coordinates win."""
+    db = fresh_db()
+    record_observation(db, "A", "2026-07-18", TS_UTC, "position", 1)
+    archive = tmp_path / "archive"
+    day = archive / "20260718"
+    day.mkdir(parents=True)
+    (day / "215141.pb.zst").write_bytes(zstandard.ZstdCompressor().compress(
+        make_feed([vehicle("A", lat=53.1, lon=-6.1)])))       # authoritative
+    (day / "215141.bak.pb.zst").write_bytes(zstandard.ZstdCompressor().compress(
+        make_feed([vehicle("A", lat=53.9, lon=-6.9)])))       # stale copy
+    res = backfill_archive(db, archive, apply=True)
+    assert coords(db) == (pytest.approx(53.1, abs=1e-4), pytest.approx(-6.1, abs=1e-4))
+    assert res.unreadable == 1
+    assert res.ambiguous == 0
+
+
+def test_two_different_prefixes_in_the_same_day_dir_still_replay_normally(tmp_path):
+    """Regression guard: the collision guard must not become a blanket
+    refusal for an entire day directory - only files that truly share a
+    ts_prefix are held back."""
+    db = fresh_db()
+    record_observation(db, "A", "2026-07-18", TS_UTC, "position", 1)
+    record_observation(db, "B", "2026-07-18", "2026-07-18T22:00:00+00:00", "position", 1)
+    archive = tmp_path / "archive"
+    write_snapshot(archive, "20260718", "215141", [vehicle("A")])
+    write_snapshot(archive, "20260718", "220000", [vehicle("B")])
+    res = backfill_archive(db, archive, apply=True)
+    assert (res.files, res.filled, res.ambiguous) == (2, 2, 0)
+    assert coords(db, "A")[0] is not None and coords(db, "B")[0] is not None
+
+
+def test_dry_run_and_apply_agree_on_cross_file_collision_counters(tmp_path):
+    """Previously divergent: dry-run reported 'would fill 2, ambiguous 0'
+    while --apply reported 'filled 1, already 1', because each colliding
+    file was probed and written independently within a single run - the
+    second file's probe saw the first file's own UPDATE and looked like
+    "already filled". Refusing to replay any colliding file at all makes
+    both modes agree exactly, on every counter."""
+    db_dry = fresh_db()
+    record_observation(db_dry, "A", "2026-07-18", TS_UTC, "position", 1)
+    db_apply = fresh_db()
+    record_observation(db_apply, "A", "2026-07-18", TS_UTC, "position", 1)
+    archive = tmp_path / "archive"
+    write_snapshot(archive / "a", "20260718", "215141", [vehicle("A", lat=53.1, lon=-6.1)])
+    write_snapshot(archive / "b", "20260718", "215141", [vehicle("A", lat=53.9, lon=-6.9)])
+
+    dry = backfill_archive(db_dry, archive, apply=False)
+    applied = backfill_archive(db_apply, archive, apply=True)
+
+    assert (dry.filled, dry.already_filled, dry.ambiguous, dry.pings) == \
+           (applied.filled, applied.already_filled, applied.ambiguous, applied.pings)
+    assert dry.ambiguous == 2
+    assert coords(db_apply) == (None, None)
 
 
 # --- whole-archive idempotency (Finding 4) -----------------------------------

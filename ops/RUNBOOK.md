@@ -371,3 +371,96 @@ SQL
 Mean is deliberately the coarse first cut here — it is cheap and a jump in
 it is a reliable "go look at §6.1 for that day" trigger. Do not publish the
 mean itself: staleness is a tail phenomenon and the mean hides the tail.
+
+---
+
+## 7. Backfilling GPS coordinates from the archive (`ingest/backfill.py`)
+
+The first ~1.5 days of burn-in (before G1's poller restart, §5) captured raw
+`state/archive/YYYYMMDD/HHMMSS.pb.zst` snapshots without ever writing
+`lat`/`lon` into `observations` — coordinate capture didn't exist yet, but the
+positions were in the feed all along, sitting compressed in the archive. This
+one-off tool replays those snapshots and fills the gap. It also backfills
+`vehicle_ts` on any row still missing it, for the same reason (that column was
+a still-later schema addition — §6), and degrades cleanly on a database that
+predates that migration.
+
+**Always dry-run first and read the counters before `--apply`:**
+
+```bash
+cd /opt/ghost-bus
+.venv/bin/python -m ingest.backfill                 # dry run, whole archive
+.venv/bin/python -m ingest.backfill --day 20260717   # dry run, one day only
+```
+
+Add `--apply` only once the dry-run counters look right:
+
+```bash
+.venv/bin/python -m ingest.backfill --apply
+```
+
+### 7.1 Reading the counters
+
+The tool prints two summary lines. The second one is the one to read
+carefully:
+
+```
+snapshots read <N> (unreadable <N>); coordinate pings <N>
+filled <N>; already had coordinates <N>; no stored observation <N>; ambiguous <N>
+```
+
+- **filled** — pings that wrote (or, in dry-run, would write) at least one
+  new column value. This is the number that should be large on the first
+  `--apply` run and drop to (near) zero on every run after.
+- **already had coordinates** — pings that wrote nothing because the
+  matching row already held every column this run can fill, or this ping
+  simply had no value to offer for whatever was still missing (a vehicle
+  that never reports its own timestamp can never advance `vehicle_ts`, and
+  that has to read as "nothing to do", not "still fillable forever"). A
+  second `--apply` pass over the same archive should land almost entirely
+  in this bucket.
+- **no stored observation** — a usable position ping in the archive with no
+  matching row in `observations` at all. Expected in modest numbers (a poll
+  that got archived but whose parse the live poller itself skipped for an
+  unrelated reason); a number close to **coordinate pings** means the join
+  key is broken and the run needs to stop before `--apply`.
+- **ambiguous** — pings whose join key matched *more than one* stored row.
+  This means two vehicles reported the same `trip_id` in the same snapshot;
+  this tool's key (`trip_id`, `service_date`, second-resolution `ts_utc`)
+  cannot tell them apart, and writing anyway would risk pinning one
+  vehicle's real coordinates onto the other's row — a wrong coordinate,
+  which is worse than the missing one this tool exists to fix. Neither
+  candidate row is touched, and this counter is where that fact stays
+  visible instead of being silently absorbed into "already had
+  coordinates". **A nonzero `ambiguous` count is not a bug in this tool —
+  it is the tool refusing to guess.** It should stay small; if it is a
+  large fraction of `coordinate pings`, treat that as a feed data-quality
+  finding worth its own investigation, not something to work around here.
+- **unreadable** — snapshot files that failed to decompress or parse (a
+  truncated zstd frame, a gateway error page the poller archived before the
+  parse guard existed, or an unrecognisable filename). Each one is printed
+  to stderr with the file path and the exception repr as it's counted, so a
+  spike here is diagnosable rather than an opaque number — check whether
+  it's a handful of known-corrupt files (fine) or a new failure mode (not
+  fine, look at the printed exceptions).
+
+### 7.2 Safety
+
+**It never overwrites a value that is already set**, column by column — not
+just row by row. If a row already has `lat`/`lon` from live capture but is
+still missing `vehicle_ts` (a row from the window between the G1 and
+`vehicle_ts` deploys), this tool fills only `vehicle_ts` and leaves the
+existing coordinates untouched; the reverse is equally true. This holds in
+both dry-run and `--apply`, and it's how the second-run-is-a-no-op guarantee
+above works.
+
+**It is safe to run against the live, actively-polled database.** Every
+snapshot it replays is already in the past by construction (its key comes
+from an archived file's own timestamp), so it can never collide with the
+live poller's `INSERT`s, which always stamp the current moment. Each
+archive file commits in its own short transaction, so it never holds a
+write lock open long enough to starve the poller or the classifier. No
+service needs to be stopped for this to run. That said, treat `--apply` as
+you would any bulk write: run the dry-run first, and prefer running it when
+you can watch `journalctl -u ghostbus-poller.service` afterward to confirm
+nothing regressed.

@@ -25,7 +25,8 @@ def make_feed(entities):
     return feed.SerializeToString()
 
 
-def vehicle(trip_id, lat=53.3492, lon=-6.2603, start_date="20260718", with_position=True):
+def vehicle(trip_id, lat=53.3492, lon=-6.2603, start_date="20260718", with_position=True,
+           timestamp=0):
     e = rt.FeedEntity()
     e.id = f"v-{trip_id}"
     e.vehicle.trip.trip_id = trip_id
@@ -33,6 +34,8 @@ def vehicle(trip_id, lat=53.3492, lon=-6.2603, start_date="20260718", with_posit
     if with_position:
         e.vehicle.position.latitude = lat
         e.vehicle.position.longitude = lon
+    if timestamp:
+        e.vehicle.timestamp = timestamp
     return e
 
 
@@ -155,6 +158,34 @@ def test_unusable_keys_are_skipped_exactly_as_the_poller_skips_them():
     assert res.pings == 0  # no trip_id / unmatchable service date
 
 
+# --- ambiguous matches (Finding 1) -------------------------------------------
+
+def test_two_entities_sharing_a_trip_id_in_one_snapshot_write_neither_row():
+    """Two distinct vehicles reported the same trip_id in the same poll (the
+    poller stored both as separate NULL rows). The archive replay can't tell
+    which entity belongs to which row, so it must refuse to guess: neither
+    row is written, and the ambiguity is counted, not silently dropped."""
+    db = fresh_db()
+    record_observation(db, "A", "2026-07-18", TS_UTC, "position", 1)
+    record_observation(db, "A", "2026-07-18", TS_UTC, "position", 2)
+    res = backfill_file(db, make_feed([vehicle("A", lat=53.1, lon=-6.1),
+                                       vehicle("A", lat=53.9, lon=-6.9)]),
+                        TS_PREFIX, apply=True)
+    rows = db.execute("SELECT lat, lon FROM observations WHERE trip_id='A'").fetchall()
+    assert rows == [(None, None), (None, None)]
+    assert res.ambiguous == 2
+    assert (res.filled, res.already_filled) == (0, 0)
+
+
+def test_ordinary_single_match_still_writes_correctly_alongside_ambiguity_guard():
+    db = fresh_db()
+    record_observation(db, "A", "2026-07-18", TS_UTC, "position", 1)
+    res = backfill_file(db, make_feed([vehicle("A", lat=53.1, lon=-6.1)]),
+                        TS_PREFIX, apply=True)
+    assert coords(db) == (pytest.approx(53.1, abs=1e-4), pytest.approx(-6.1, abs=1e-4))
+    assert (res.filled, res.ambiguous) == (1, 0)
+
+
 # --- archive walk -----------------------------------------------------------
 
 def write_snapshot(archive, day, hhmmss, entities):
@@ -186,6 +217,21 @@ def test_corrupt_snapshot_does_not_abort_the_run(tmp_path):
     write_snapshot(archive, "20260718", "215141", [vehicle("A")])
     res = backfill_archive(db, archive, apply=True)
     assert (res.unreadable, res.filled) == (1, 1)
+
+
+def test_unreadable_snapshot_surfaces_path_and_exception(tmp_path, capsys):
+    """Finding 3: a caught _UNREADABLE exception must not vanish. A future
+    logic bug hiding behind the same broad catch tuple has to be
+    diagnosable, not indistinguishable from ordinary archive corruption."""
+    db = fresh_db()
+    archive = tmp_path / "archive"
+    (archive / "20260718").mkdir(parents=True)
+    bad = archive / "20260718" / "215140.pb.zst"
+    bad.write_bytes(b"this is not zstd")
+    backfill_archive(db, archive, apply=True)
+    err = capsys.readouterr().err
+    assert bad.name in err
+    assert "ZstdError" in err
 
 
 def test_valid_zstd_that_is_not_a_feed_counts_as_unreadable(tmp_path):
@@ -266,6 +312,99 @@ def test_round_trip_against_the_real_poller(tmp_path):
     assert (res.files, res.pings, res.filled, res.no_row) == (1, 2, 2, 0)
     assert coords(db, "A")[0] == pytest.approx(53.3, abs=1e-4)
     assert coords(db, "B")[1] == pytest.approx(-6.30, abs=1e-4)
+
+
+# --- whole-archive idempotency (Finding 4) -----------------------------------
+
+def test_archive_level_second_apply_run_changes_nothing(tmp_path):
+    db = fresh_db()
+    record_observation(db, "A", "2026-07-18", TS_UTC, "position", 1)
+    record_observation(db, "B", "2026-07-19", "2026-07-19T06:00:00.5+00:00", "position", 1)
+    archive = tmp_path / "archive"
+    write_snapshot(archive, "20260718", "215141", [vehicle("A")])
+    write_snapshot(archive, "20260719", "060000", [vehicle("B", start_date="20260719")])
+
+    first = backfill_archive(db, archive, apply=True)
+    after_first = db.execute(
+        "SELECT trip_id, lat, lon FROM observations ORDER BY trip_id").fetchall()
+
+    second = backfill_archive(db, archive, apply=True)
+    after_second = db.execute(
+        "SELECT trip_id, lat, lon FROM observations ORDER BY trip_id").fetchall()
+
+    assert first.filled == 2
+    assert after_first == after_second
+    assert (second.filled, second.already_filled) == (0, 2)
+
+
+# --- vehicle_ts backfill (Finding 2) -----------------------------------------
+
+G1_ONLY_SCHEMA = """
+CREATE TABLE observations (
+  trip_id TEXT, service_date TEXT, ts_utc TEXT, kind TEXT, stop_sequence INTEGER,
+  lat REAL, lon REAL);
+CREATE TABLE heartbeats (ts_utc TEXT PRIMARY KEY, ok INTEGER);
+"""
+
+
+def g1_only_db(path=":memory:"):
+    """G1 is deployed (lat/lon exist) but the later vehicle_ts migration has
+    not landed - a real intermediate state a live VM could be caught in."""
+    db = sqlite3.connect(path)
+    db.executescript(G1_ONLY_SCHEMA)
+    db.commit()
+    return db
+
+
+def insert_g1_row(db, trip_id, service_date, ts_utc, lat=None, lon=None):
+    db.execute("INSERT INTO observations "
+               "(trip_id, service_date, ts_utc, kind, stop_sequence, lat, lon) "
+               "VALUES (?,?,?,'position',1,?,?)", (trip_id, service_date, ts_utc, lat, lon))
+    db.commit()
+
+
+def test_vehicle_ts_column_absent_degrades_cleanly(tmp_path):
+    """A database that predates the vehicle_ts migration must still backfill
+    lat/lon rather than crash on "no such column: vehicle_ts"."""
+    db = g1_only_db()
+    insert_g1_row(db, "A", "2026-07-18", TS_UTC)
+    archive = tmp_path / "archive"
+    write_snapshot(archive, "20260718", "215141", [vehicle("A")])
+    res = backfill_archive(db, archive, apply=True)
+    assert (res.files, res.filled) == (1, 1)
+    lat, lon = db.execute("SELECT lat, lon FROM observations WHERE trip_id='A'").fetchone()
+    assert lat == pytest.approx(53.3492, abs=1e-4)
+    assert lon == pytest.approx(-6.2603, abs=1e-4)
+
+
+def test_vehicle_ts_column_present_is_auto_detected_and_backfilled(tmp_path):
+    db = fresh_db()
+    record_observation(db, "A", "2026-07-18", TS_UTC, "position", 1)
+    ts = int(dt.datetime(2026, 7, 18, 21, 51, 30, tzinfo=dt.timezone.utc).timestamp())
+    archive = tmp_path / "archive"
+    write_snapshot(archive, "20260718", "215141", [vehicle("A", timestamp=ts)])
+    backfill_archive(db, archive, apply=True)
+    vehicle_ts = db.execute(
+        "SELECT vehicle_ts FROM observations WHERE trip_id='A'").fetchone()[0]
+    assert vehicle_ts == "2026-07-18T21:51:30+00:00"
+
+
+def test_vehicle_ts_never_overwritten_while_lat_lon_still_fill_independently(tmp_path):
+    """Preserve the never-overwrite guarantee per column, not per row: a row
+    that already has vehicle_ts (written by a later poller than the one that
+    left lat/lon NULL) must keep its vehicle_ts untouched while still getting
+    lat/lon filled from the same archived ping."""
+    db = fresh_db()
+    record_observation(db, "A", "2026-07-18", TS_UTC, "position", 1,
+                       vehicle_ts="2026-07-18T21:50:00+00:00")
+    archive = tmp_path / "archive"
+    ts = int(dt.datetime(2026, 7, 18, 21, 51, 30, tzinfo=dt.timezone.utc).timestamp())
+    write_snapshot(archive, "20260718", "215141", [vehicle("A", timestamp=ts)])
+    backfill_archive(db, archive, apply=True)
+    lat, lon, vts = db.execute(
+        "SELECT lat, lon, vehicle_ts FROM observations WHERE trip_id='A'").fetchone()
+    assert lat is not None and lon is not None
+    assert vts == "2026-07-18T21:50:00+00:00"
 
 
 # --- pre-G1 schema ----------------------------------------------------------

@@ -108,3 +108,46 @@ def test_scheduled_trips_agency_filter_none_returns_all(db):
 
 def test_scheduled_trips_agency_filter_unknown_name_returns_empty(db):
     assert scheduled_trips(db, dt.date(2026, 3, 23), agency_names={"Nonexistent Co"}) == []
+
+
+def test_load_stores_stop_coordinates_and_skips_uncodable(db):
+    stops = {sid: (lat, lon) for sid, lat, lon
+             in db.execute("SELECT stop_id, lat, lon FROM gtfs_stops")}
+    assert stops["S1"] == (pytest.approx(53.3000), pytest.approx(-6.2000))
+    assert stops["S3"] == (pytest.approx(53.3072), pytest.approx(-6.2000))
+    assert "SBAD" not in stops  # blank coordinates -> skipped, never stored
+    assert len(stops) == 7
+
+
+def test_load_stores_stop_id_in_stop_times(db):
+    rows = db.execute(
+        "SELECT stop_sequence, stop_id FROM gtfs_stop_times "
+        "WHERE trip_id='R1_wk_00' ORDER BY stop_sequence").fetchall()
+    assert rows == [(1, "S1"), (2, "S2"), (3, "S3"), (4, "S4"), (5, "S5")]
+
+
+def test_load_stores_route_names(db):
+    rows = dict((rid, (s, l)) for rid, s, l in db.execute(
+        "SELECT route_id, route_short_name, route_long_name FROM gtfs_routes"))
+    assert rows["R1"] == ("1", "Fixtureville Main")
+    assert rows["R3"] == ("3", "Fixtureville Crosstown")
+
+
+def test_load_migrates_legacy_schema(tmp_path):
+    # A DB created by the pre-G1 loader: no stop_id column, no name columns,
+    # no gtfs_stops table. load_gtfs must migrate it in place.
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        "CREATE TABLE gtfs_stop_times (trip_id TEXT, stop_sequence INTEGER, dep_seconds INTEGER);"
+        "CREATE TABLE gtfs_routes (route_id TEXT PRIMARY KEY, agency_id TEXT);")
+    zip_path = tmp_path / "f.zip"
+    build_gtfs_zip(zip_path)
+    load_gtfs(zip_path, conn)
+    (sid,) = conn.execute("SELECT stop_id FROM gtfs_stop_times "
+                          "WHERE trip_id='R1_wk_00' AND stop_sequence=1").fetchone()
+    assert sid == "S1"
+    (short,) = conn.execute(
+        "SELECT route_short_name FROM gtfs_routes WHERE route_id='R1'").fetchone()
+    assert short == "1"
+    (n,) = conn.execute("SELECT COUNT(*) FROM gtfs_stops").fetchone()
+    assert n == 7

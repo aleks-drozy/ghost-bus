@@ -19,14 +19,16 @@ UTC = dt.timezone.utc
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS gtfs_trips (trip_id TEXT PRIMARY KEY, route_id TEXT, service_id TEXT);
-CREATE TABLE IF NOT EXISTS gtfs_stop_times (trip_id TEXT, stop_sequence INTEGER, dep_seconds INTEGER);
+CREATE TABLE IF NOT EXISTS gtfs_stop_times (trip_id TEXT, stop_sequence INTEGER, dep_seconds INTEGER, stop_id TEXT);
 CREATE TABLE IF NOT EXISTS gtfs_calendar (
   service_id TEXT PRIMARY KEY, monday INT, tuesday INT, wednesday INT, thursday INT,
   friday INT, saturday INT, sunday INT, start_date TEXT, end_date TEXT);
 CREATE TABLE IF NOT EXISTS gtfs_calendar_dates (
   service_id TEXT, date TEXT, exception_type INTEGER);
-CREATE TABLE IF NOT EXISTS gtfs_routes (route_id TEXT PRIMARY KEY, agency_id TEXT);
+CREATE TABLE IF NOT EXISTS gtfs_routes (route_id TEXT PRIMARY KEY, agency_id TEXT,
+  route_short_name TEXT, route_long_name TEXT);
 CREATE TABLE IF NOT EXISTS gtfs_agency (agency_id TEXT PRIMARY KEY, agency_name TEXT);
+CREATE TABLE IF NOT EXISTS gtfs_stops (stop_id TEXT PRIMARY KEY, lat REAL, lon REAL);
 CREATE TABLE IF NOT EXISTS gtfs_meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE INDEX IF NOT EXISTS idx_stop_times_trip ON gtfs_stop_times(trip_id);
 """
@@ -65,9 +67,28 @@ def _insert_stream(db: sqlite3.Connection, sql: str, tuples) -> None:
         db.executemany(sql, batch)
 
 
+def _ensure_columns(db: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    """Idempotently add columns that pre-G1 databases lack (live VM migration)."""
+    existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+    for name, decl in columns.items():
+        if name not in existing:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
+def _stop_rows(rows):
+    for r in rows:
+        try:
+            yield (r["stop_id"], float(r["stop_lat"]), float(r["stop_lon"]))
+        except (KeyError, ValueError):
+            continue  # uncodable stop: it simply can't participate in geo matching
+
+
 def load_gtfs(zip_path: str | Path, db: sqlite3.Connection) -> str:
     digest = hashlib.sha256(Path(zip_path).read_bytes()).hexdigest()
     db.executescript(_SCHEMA)
+    _ensure_columns(db, "gtfs_stop_times", {"stop_id": "TEXT"})
+    _ensure_columns(db, "gtfs_routes",
+                    {"route_short_name": "TEXT", "route_long_name": "TEXT"})
     with zipfile.ZipFile(zip_path) as zf:
         def rows(name):
             with zf.open(name) as fh:
@@ -78,14 +99,23 @@ def load_gtfs(zip_path: str | Path, db: sqlite3.Connection) -> str:
         db.execute("DELETE FROM gtfs_calendar_dates")
         db.execute("DELETE FROM gtfs_routes")
         db.execute("DELETE FROM gtfs_agency")
+        db.execute("DELETE FROM gtfs_stops")
         _insert_stream(db, "INSERT INTO gtfs_trips VALUES (?,?,?)",
                        ((r["trip_id"], r["route_id"], r["service_id"]) for r in rows("trips.txt")))
-        _insert_stream(db, "INSERT INTO gtfs_routes VALUES (?,?)",
-                       ((r["route_id"], r["agency_id"]) for r in rows("routes.txt")))
+        _insert_stream(db, "INSERT INTO gtfs_routes "
+                       "(route_id, agency_id, route_short_name, route_long_name) "
+                       "VALUES (?,?,?,?)",
+                       ((r["route_id"], r["agency_id"],
+                         r.get("route_short_name") or None,
+                         r.get("route_long_name") or None) for r in rows("routes.txt")))
         _insert_stream(db, "INSERT INTO gtfs_agency VALUES (?,?)",
                        ((r["agency_id"], r["agency_name"]) for r in rows("agency.txt")))
-        _insert_stream(db, "INSERT INTO gtfs_stop_times VALUES (?,?,?)",
-                       ((r["trip_id"], int(r["stop_sequence"]), gtfs_seconds(r["departure_time"]))
+        _insert_stream(db, "INSERT OR REPLACE INTO gtfs_stops VALUES (?,?,?)",
+                       _stop_rows(rows("stops.txt")))
+        _insert_stream(db, "INSERT INTO gtfs_stop_times "
+                       "(trip_id, stop_sequence, dep_seconds, stop_id) VALUES (?,?,?,?)",
+                       ((r["trip_id"], int(r["stop_sequence"]),
+                         gtfs_seconds(r["departure_time"]), r["stop_id"])
                         for r in rows("stop_times.txt")))
         _insert_stream(db, "INSERT INTO gtfs_calendar VALUES (?,?,?,?,?,?,?,?,?,?)",
                        ((r["service_id"], *[int(r[d]) for d in

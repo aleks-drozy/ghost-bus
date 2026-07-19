@@ -12,6 +12,15 @@ FIXTURE_TZ = "Europe/Dublin"
 _STOPS_R1 = ["S1", "S2", "S3", "S4", "S5"]
 _STOPS_R2 = ["S2", "S4", "S6", "S7"]
 
+# Distinct coordinates ~400 m apart along a north-south line so nearest-stop
+# matching is meaningful in tests (0.0036 deg latitude ~= 400.3 m).
+_STOP_COORDS = {
+    "S1": ("53.3000", "-6.2000"), "S2": ("53.3036", "-6.2000"),
+    "S3": ("53.3072", "-6.2000"), "S4": ("53.3108", "-6.2000"),
+    "S5": ("53.3144", "-6.2000"), "S6": ("53.3180", "-6.2000"),
+    "S7": ("53.3216", "-6.2000"),
+}
+
 
 def _hms(total_seconds: int) -> str:
     h, rem = divmod(total_seconds, 3600)
@@ -33,8 +42,12 @@ def build_gtfs_zip(path: str | Path) -> None:
                "agency_url": "https://example.invalid", "agency_timezone": FIXTURE_TZ},
               {"agency_id": "GAI", "agency_name": "Go-Ahead Fixtureville",
                "agency_url": "https://example.invalid", "agency_timezone": FIXTURE_TZ}]
-    stops = [{"stop_id": s, "stop_name": f"Stop {s}", "stop_lat": "53.3", "stop_lon": "-6.2"}
+    stops = [{"stop_id": s, "stop_name": f"Stop {s}",
+              "stop_lat": _STOP_COORDS[s][0], "stop_lon": _STOP_COORDS[s][1]}
              for s in sorted(set(_STOPS_R1 + _STOPS_R2))]
+    # An uncodable stop: the loader must skip it, not store garbage coordinates.
+    stops.append({"stop_id": "SBAD", "stop_name": "Stop SBAD",
+                  "stop_lat": "", "stop_lon": ""})
     routes = [{"route_id": "R1", "agency_id": "FVB", "route_short_name": "1",
                "route_long_name": "Fixtureville Main", "route_type": "3"},
               {"route_id": "R2", "agency_id": "FVB", "route_short_name": "2",

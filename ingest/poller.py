@@ -36,22 +36,27 @@ def parse_feed(raw: bytes) -> list[dict]:
             if tu.trip.schedule_relationship == rt.TripDescriptor.CANCELED:
                 out.append({"trip_id": tu.trip.trip_id, "kind": "cancel",
                             "stop_sequence": None, "start_date": tu.trip.start_date,
-                            "lat": None, "lon": None})
+                            "lat": None, "lon": None, "vehicle_ts": None})
             else:
                 seqs = [stu.stop_sequence for stu in tu.stop_time_update
                         if stu.HasField("stop_sequence")]
                 out.append({"trip_id": tu.trip.trip_id, "kind": "update",
                             "stop_sequence": max(seqs) if seqs else None,
                             "start_date": tu.trip.start_date,
-                            "lat": None, "lon": None})
+                            "lat": None, "lon": None, "vehicle_ts": None})
         elif entity.HasField("vehicle"):
             v = entity.vehicle
             has_pos = v.HasField("position")
+            # v.timestamp is uint64 POSIX seconds; 0 (the proto default) means the
+            # vehicle sent no report time - a real 1970 report is impossible.
             out.append({"trip_id": v.trip.trip_id, "kind": "position",
                         "stop_sequence": v.current_stop_sequence if v.HasField("current_stop_sequence") else None,
                         "start_date": v.trip.start_date,
                         "lat": v.position.latitude if has_pos else None,
-                        "lon": v.position.longitude if has_pos else None})
+                        "lon": v.position.longitude if has_pos else None,
+                        "vehicle_ts": dt.datetime.fromtimestamp(
+                            v.timestamp, tz=dt.timezone.utc).isoformat()
+                        if v.timestamp else None})
     return out
 
 
@@ -89,7 +94,7 @@ def poll_once(db: sqlite3.Connection, fetch_fn: Callable[[], bytes],
             continue
         record_observation(db, obs["trip_id"], _service_date(obs["start_date"]),
                            now.isoformat(), obs["kind"], obs["stop_sequence"],
-                           obs["lat"], obs["lon"])
+                           obs["lat"], obs["lon"], obs["vehicle_ts"])
         count += 1
     return count
 

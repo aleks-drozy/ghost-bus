@@ -291,3 +291,79 @@ This sequence starts coordinate capture soonest:
    lock open against the poller), but the classification pass itself is
    still single-threaded on shared CPU and a long-running geo-match sweep
    is still worth catching early.
+
+---
+
+## 6. Burn-in measurement: feed staleness (vehicle_ts vs ts_utc)
+
+Every VehiclePositions ping stores two clocks: `ts_utc` (when *we* polled)
+and `vehicle_ts` (when the *vehicle* says it reported). Their difference is
+the feed's republication lag. This matters because the classifier's 10-minute
+COMPLETED branch treats any position in the window as evidence the bus was
+moving — if NTA republishes a frozen position for a bus that went silent,
+that reads as a live bus, and the error is operator-flattering.
+
+**Nothing classifies on this yet** (see the README's Known limitations). The
+purpose of this section is to produce the distribution that would justify a
+threshold. Deploy note: `vehicle_ts` is NULL for every row written before this
+upgrade, and NULL is not evidence of freshness — the coverage columns below
+exist so a partly-migrated database can't be mistaken for a fresh-feed result.
+
+### 6.1 Lag distribution
+
+```bash
+sqlite3 /opt/ghost-bus/state/ghostbus.db <<'SQL'
+WITH lag AS (
+  SELECT CAST(ROUND((julianday(ts_utc) - julianday(vehicle_ts)) * 86400.0) AS INTEGER) AS s
+  FROM observations
+  WHERE kind = 'position' AND vehicle_ts IS NOT NULL
+)
+SELECT
+  (SELECT COUNT(*) FROM observations WHERE kind='position')                       AS positions,
+  (SELECT COUNT(*) FROM lag)                                                      AS with_vehicle_ts,
+  (SELECT MIN(s) FROM lag)                                                        AS min_s,
+  (SELECT s FROM lag ORDER BY s LIMIT 1 OFFSET (SELECT COUNT(*)/2     FROM lag))  AS p50_s,
+  (SELECT s FROM lag ORDER BY s LIMIT 1 OFFSET (SELECT COUNT(*)*9/10  FROM lag))  AS p90_s,
+  (SELECT s FROM lag ORDER BY s LIMIT 1 OFFSET (SELECT COUNT(*)*99/100 FROM lag)) AS p99_s,
+  (SELECT MAX(s) FROM lag)                                                        AS max_s;
+SQL
+```
+
+Reading the output:
+
+- `with_vehicle_ts` well below `positions` after a full day of post-upgrade
+  polling means the feed omits vehicle timestamps for some operators — that
+  is itself a finding, and it caps how much of the fleet any staleness rule
+  could ever cover.
+- `p50_s` is the feed's normal republication lag. Expect tens of seconds; our
+  own poll cadence (60 s, each endpoint sampled every 120 s) is inside this
+  number, so a small positive median is healthy, not stale.
+- `p90_s`/`p99_s`/`max_s` are where frozen positions would show up. A long
+  tail — positions minutes old still being served — is the signal that the
+  COMPLETED branch is crediting stale evidence.
+- **Negative `min_s` means vehicle clock skew, not staleness** (the bus
+  claims to have reported after we fetched). A few seconds is unremarkable;
+  large negatives mean `vehicle_ts` is unreliable for those vehicles and any
+  future threshold must tolerate them.
+
+### 6.2 Per-day trend
+
+One run of the above pools every day since the upgrade. Split it by day
+before drawing conclusions — a single outage day can dominate the tail:
+
+```bash
+sqlite3 /opt/ghost-bus/state/ghostbus.db <<'SQL'
+SELECT substr(ts_utc,1,10) AS day,
+       COUNT(*)                                                                   AS positions,
+       SUM(vehicle_ts IS NOT NULL)                                                AS with_vehicle_ts,
+       CAST(ROUND(AVG(CASE WHEN vehicle_ts IS NOT NULL
+            THEN (julianday(ts_utc)-julianday(vehicle_ts))*86400.0 END)) AS INTEGER) AS mean_lag_s
+FROM observations
+WHERE kind = 'position'
+GROUP BY day ORDER BY day;
+SQL
+```
+
+Mean is deliberately the coarse first cut here — it is cheap and a jump in
+it is a reliable "go look at §6.1 for that day" trigger. Do not publish the
+mean itself: staleness is a tail phenomenon and the mean hides the tail.

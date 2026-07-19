@@ -117,8 +117,17 @@ starts seeing the live feed instead of fixtures.
 - **Advance cancellations that leave the feed before a trip's window opens
   would classify UNTRACKED**, not CANCELLED — feed retention behaviour
   around cancellations is to be verified in burn-in.
-- **Feed staleness is not yet detected** — a frozen upstream feed would look
-  like healthy polling. A staleness check is planned for Phase 2.
+- **Feed staleness is measured but not yet acted on.** Every VehiclePositions
+  ping now stores the vehicle's own report time (`observations.vehicle_ts`)
+  alongside our poll time (`ts_utc`), so a republished stale position is
+  finally distinguishable from a live one. **No classifier behaviour depends
+  on it yet** — this is deliberate: the 10-minute COMPLETED branch currently
+  treats a stale republished position as fresh evidence a bus was moving,
+  which is operator-flattering, but choosing a staleness threshold before
+  seeing the real lag distribution would just be guessing. Burn-in measures
+  the distribution (`ops/RUNBOOK.md` §6); a methodology amendment follows the
+  data, not the other way round. Pre-G2 rows have `vehicle_ts` NULL and are
+  not evidence of freshness either way.
 - **Hour-of-day statistics pool across dates** — the route/hour rollup does
   not distinguish, say, "Tuesdays at 5pm" from every day at 5pm ever
   observed.

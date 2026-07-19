@@ -296,6 +296,10 @@ This sequence starts coordinate capture soonest:
 
 ## 6. Burn-in measurement: feed staleness (vehicle_ts vs ts_utc)
 
+> Schema addition only — **not** a spec amendment. The classification
+> methodology is unchanged since G1; this section adds a measurement whose
+> results may *later* justify an amendment.
+
 Every VehiclePositions ping stores two clocks: `ts_utc` (when *we* polled)
 and `vehicle_ts` (when the *vehicle* says it reported). Their difference is
 the feed's republication lag. This matters because the classifier's 10-minute

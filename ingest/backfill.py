@@ -192,11 +192,17 @@ def backfill_file(db: sqlite3.Connection, raw: bytes, ts_prefix: str,
         groups.setdefault(key, []).append(obs)
 
     for key, pings in groups.items():
+        trip_id, service_date, _ = key
         if len(pings) > 1:
             # Two or more pings in this snapshot share this key - two
             # vehicles reported this trip_id in this poll and the key can't
             # tell them apart. Refuse to guess for any of them, regardless
-            # of how many stored rows currently match.
+            # of how many stored rows currently match. One line per key
+            # (not per ping) so a pathological snapshot can't flood stderr.
+            print(f"ambiguous ping trip_id={trip_id} service_date={service_date} "
+                  f"ts_prefix={ts_prefix}: {len(pings)} pings in this snapshot "
+                  f"share this join key - refusing to guess which is which",
+                  file=sys.stderr)
             res.ambiguous += len(pings)
             continue
         obs = pings[0]
@@ -208,7 +214,12 @@ def backfill_file(db: sqlite3.Connection, raw: bytes, ts_prefix: str,
             # The snapshot only carried one ping for this key, but more than
             # one stored row matches it anyway. Writing here would risk
             # pinning this entity's real coordinates onto the wrong physical
-            # row. Refuse to guess.
+            # row. Refuse to guess. Distinct wording from the shared-key
+            # case above: this is duplicate stored rows, not two vehicles
+            # colliding in one poll, and the two point at different causes.
+            print(f"ambiguous ping trip_id={trip_id} service_date={service_date} "
+                  f"ts_prefix={ts_prefix}: matches {len(rows)} stored rows for "
+                  f"this key - refusing to guess which one", file=sys.stderr)
             res.ambiguous += 1
             continue
         # A column is worth writing only if it's currently NULL *and* this

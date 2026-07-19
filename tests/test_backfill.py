@@ -166,11 +166,18 @@ def test_unusable_keys_are_skipped_exactly_as_the_poller_skips_them():
 
 # --- ambiguous matches (Finding 1) -------------------------------------------
 
-def test_two_entities_sharing_a_trip_id_in_one_snapshot_write_neither_row():
+def test_two_entities_sharing_a_trip_id_in_one_snapshot_write_neither_row(capsys):
     """Two distinct vehicles reported the same trip_id in the same poll (the
     poller stored both as separate NULL rows). The archive replay can't tell
     which entity belongs to which row, so it must refuse to guess: neither
-    row is written, and the ambiguity is counted, not silently dropped."""
+    row is written, and the ambiguity is counted, not silently dropped.
+
+    The in-file path used to increment the counter with no stderr at all,
+    leaving an operator no way to find which trip caused a nonzero
+    `ambiguous` short of hand-writing a GROUP BY query (RUNBOOK 7.1). It must
+    now name the trip on stderr and identify this as the shared-key
+    condition - distinct wording from the duplicate-stored-rows condition,
+    since the two mean different things to an operator."""
     db = fresh_db()
     record_observation(db, "A", "2026-07-18", TS_UTC, "position", 1)
     record_observation(db, "A", "2026-07-18", TS_UTC, "position", 2)
@@ -181,6 +188,10 @@ def test_two_entities_sharing_a_trip_id_in_one_snapshot_write_neither_row():
     assert rows == [(None, None), (None, None)]
     assert res.ambiguous == 2
     assert (res.filled, res.already_filled) == (0, 0)
+    err = capsys.readouterr().err
+    assert "A" in err and TS_PREFIX in err
+    assert "2 pings" in err and "share" in err
+    assert "stored row" not in err  # must not read like the other condition
 
 
 def test_ordinary_single_match_still_writes_correctly_alongside_ambiguity_guard():
@@ -224,6 +235,45 @@ def test_zero_stored_rows_two_entities_sharing_key_is_ambiguous_not_a_crash():
                         TS_PREFIX, apply=True)
     assert res.ambiguous == 2
     assert (res.filled, res.already_filled, res.no_row) == (0, 0, 0)
+
+
+def test_one_ping_matching_multiple_stored_rows_is_ambiguous_and_reported(capsys):
+    """The snapshot carries exactly one ping for this key, but more than one
+    stored row already matches it (e.g. two rows landed with the same
+    trip_id/service_date/second-resolution ts_utc for reasons upstream of
+    this tool). Writing would risk pinning this ping's real coordinates onto
+    the wrong physical row, so it must be refused like the shared-key case -
+    but the operator needs different wording: this is duplicate stored rows,
+    not two vehicles colliding in one poll, and those point at different
+    root causes."""
+    db = fresh_db()
+    record_observation(db, "A", "2026-07-18", TS_UTC, "position", 1)
+    record_observation(db, "A", "2026-07-18", TS_UTC, "position", 2)
+    res = backfill_file(db, make_feed([vehicle("A", lat=53.1, lon=-6.1)]),
+                        TS_PREFIX, apply=True)
+    rows = db.execute("SELECT lat, lon FROM observations WHERE trip_id='A'").fetchall()
+    assert rows == [(None, None), (None, None)]
+    assert res.ambiguous == 1
+    assert (res.filled, res.already_filled) == (0, 0)
+    err = capsys.readouterr().err
+    assert "A" in err and TS_PREFIX in err
+    assert "2 stored rows" in err
+    assert "share this join key" not in err  # must not read like the other condition
+
+
+def test_ambiguous_stderr_is_one_line_per_key_not_per_ping(capsys):
+    """Proportionality: a pathological snapshot where N pings all share one
+    key must not flood stderr with N lines - one line per distinct
+    ambiguous key, however many pings share it, so a bad archive can't
+    drown the operator in duplicate output."""
+    db = fresh_db()
+    pings = [vehicle("A", lat=53.1 + i * 0.01, lon=-6.1) for i in range(5)]
+    res = backfill_file(db, make_feed(pings), TS_PREFIX, apply=True)
+    assert res.ambiguous == 5
+    err = capsys.readouterr().err
+    lines = [line for line in err.splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert "5 pings" in lines[0]
 
 
 # --- archive walk -----------------------------------------------------------

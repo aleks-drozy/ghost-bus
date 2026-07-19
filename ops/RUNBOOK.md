@@ -449,13 +449,26 @@ filled <N>; already had coordinates <N>; no stored observation <N>; ambiguous <N
   cases, all refused the same way: writing would risk pinning one vehicle's
   real coordinates onto the wrong row — a wrong coordinate, which is worse
   than the missing one this tool exists to fix — so none of the colliding
-  candidates are touched.
+  candidates are touched. **Every one of the three cases is now printed to
+  stderr, one line per distinct ambiguous key** (not one per ping, so a
+  pathological snapshot can't flood the log) — a nonzero `ambiguous` count
+  is traceable to the trip that caused it without hand-writing a query
+  against `observations`.
   - *Two or more pings in the same snapshot* share a key — two vehicles
     reported the same `trip_id` in the same poll, and this tool's key
     (`trip_id`, `service_date`, second-resolution `ts_utc`) cannot tell them
-    apart.
+    apart. This is a feed anomaly — genuinely ambiguous source data, nothing
+    wrong in `observations` itself. Printed as:
+    `ambiguous ping trip_id=<id> service_date=<date> ts_prefix=<ts_prefix>:
+    <N> pings in this snapshot share this join key - refusing to guess which
+    is which`.
   - Rarer: a single ping's key matches more than one stored row already in
-    `observations`.
+    `observations`. Unlike the case above, the snapshot itself is
+    unambiguous — the duplication is in the stored rows, which usually means
+    something upstream of this tool double-wrote a row for that key and is
+    worth its own look. Printed as:
+    `ambiguous ping trip_id=<id> service_date=<date> ts_prefix=<ts_prefix>:
+    matches <N> stored rows for this key - refusing to guess which one`.
   - *Two different archive files resolve to the same `ts_prefix`* — the walk
     is recursive, so this can happen from anywhere in the tree (a
     per-endpoint subdirectory, a copied day directory, a partial restore
@@ -475,7 +488,11 @@ filled <N>; already had coordinates <N>; no stored observation <N>; ambiguous <N
   it is the tool refusing to guess.** It should stay small; if it is a large
   fraction of `coordinate pings`, treat that as a feed data-quality finding
   worth its own investigation (or, for the cross-file case, a stray copy in
-  the archive tree worth cleaning up), not something to work around here.
+  the archive tree worth cleaning up), not something to work around here. The
+  stderr wording above tells you which of the two in-file cases you're
+  looking at without writing SQL: "pings in this snapshot share this join
+  key" means look at the feed for that timestamp; "matches N stored rows"
+  means look at `observations` for that key.
 
   Refused files are still counted in `snapshots read` — they were opened and
   parsed, only not written from. `snapshots read` plus `unreadable` should

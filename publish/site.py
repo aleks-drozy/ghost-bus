@@ -686,6 +686,44 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
+class InjectionError(RuntimeError):
+    """Raised when a rendered page contains markup we did not put there."""
+
+
+ALLOWED_TAGS = frozenset({
+    "html", "head", "meta", "title", "link", "body",
+    "header", "nav", "main", "footer", "section",
+    "h1", "h2", "h3", "p", "a", "ul", "ol", "li",
+    "table", "thead", "tbody", "tr", "th", "td",
+    "dl", "dt", "dd", "span", "strong", "em", "code", "small", "abbr", "br", "hr",
+})
+
+_TAG_NAME = re.compile(r"</?([a-zA-Z][a-zA-Z0-9]*)")
+_JS_HREF = re.compile(r"""(?:href|src)\s*=\s*["']?\s*javascript:""", re.IGNORECASE)
+
+
+def assert_inert(text: str, source: str = "") -> None:
+    """Fail the build if a page carries markup we did not author.
+
+    Externally-sourced strings (route names, agency names, route ids) are
+    escaped before templating, so a hostile name reaches the page as
+    &lt;script&gt; - text, with no "<" and therefore no tag. If an unescaped one
+    ever slips through, it produces a real tag, that tag is not on the
+    allowlist, and the build stops rather than shipping it.
+
+    Deliberately a tag-name allowlist and not an attribute scan: a route
+    legitimately named 'x onerror=y' must not fail the build, and once escaped
+    it cannot do anything anyway. The field-agnostic verbatim-payload test in
+    tests/test_site_escaping.py covers what this cannot see.
+    """
+    where = f" in {source}" if source else ""
+    for name in _TAG_NAME.findall(text):
+        if name.lower() not in ALLOWED_TAGS:
+            raise InjectionError(f"disallowed <{name}> tag{where}")
+    if _JS_HREF.search(text):
+        raise InjectionError(f"javascript: URL{where}")
+
+
 def _copy_dataset(data_dir: Path, dest: Path) -> None:
     """Copy only files whose shape publish/dataset.py produces.
 
@@ -766,6 +804,7 @@ def build_site(data_dir, out_dir, site_dir=SITE_DIR) -> dict:
         "about-data.html": render_about_data(site_dir, manifest, data_dir),
     }
     for name, text in pages.items():
+        assert_inert(text, name)
         _write(out_dir / name, text)
     shutil.copyfile(site_dir / "style.css", out_dir / "style.css")
 
@@ -775,12 +814,14 @@ def build_site(data_dir, out_dir, site_dir=SITE_DIR) -> dict:
     if ready:
         for position, entry in enumerate(ranked, start=1):
             name = f"{slugs[entry['route_id']]}.html"
-            _write(route_dir / name,
-                   render_route(site_dir, manifest, entry, daily_rows, slugs, position))
+            text = render_route(site_dir, manifest, entry, daily_rows, slugs, position)
+            assert_inert(text, f"route/{name}")
+            _write(route_dir / name, text)
         for entry in unranked:
             name = f"{slugs[entry['route_id']]}.html"
-            _write(route_dir / name,
-                   render_route(site_dir, manifest, entry, daily_rows, slugs, None))
+            text = render_route(site_dir, manifest, entry, daily_rows, slugs, None)
+            assert_inert(text, f"route/{name}")
+            _write(route_dir / name, text)
 
     _copy_dataset(data_dir, out_dir / "data")
 

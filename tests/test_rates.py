@@ -118,3 +118,93 @@ def test_all_successes_gives_exactly_one_for_problematic_n_values():
     for n in (6, 21, 31, 38):
         lo, hi = wilson_interval(n, n)
         assert hi == 1.0, f"Expected exactly 1.0 for n={n}, got {repr(hi)}"
+
+
+# --- The never-summed invariant (design decision D1) -------------------------
+#
+# VANISHED and UNTRACKED are separate claims and are published separately. No
+# row emitted by the rollup - and, by extension, no CSV column or table cell
+# built from one - may carry their sum. This test is the pin: any future code
+# that reintroduces a combined rate must fail here.
+
+import sqlite3  # noqa: E402  (kept next to the invariant it supports)
+
+from aggregate.rollup import RATE_KEYS, route_day_rollup  # noqa: E402
+
+
+def _invariant_db():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""
+    CREATE TABLE trip_outcomes (
+      trip_id TEXT, service_date TEXT, route_id TEXT, start_utc TEXT, outcome TEXT,
+      PRIMARY KEY (trip_id, service_date));
+    """)
+    rows = [
+        # R1: scheduled 5, excluded 1 -> denominator 4, one VANISHED, one
+        # UNTRACKED. Each rate is 0.25; the forbidden sum is 0.50, a value that
+        # matches no other field on the row, so a leak is unambiguous.
+        ("a", "2026-03-23", "R1", "2026-03-23T07:00:00+00:00", "COMPLETED"),
+        ("b", "2026-03-23", "R1", "2026-03-23T07:30:00+00:00", "UNTRACKED"),
+        ("c", "2026-03-23", "R1", "2026-03-23T08:00:00+00:00", "VANISHED"),
+        ("d", "2026-03-23", "R1", "2026-03-23T08:30:00+00:00", "EXCLUDED"),
+        ("e", "2026-03-23", "R1", "2026-03-23T09:00:00+00:00", "CANCELLED"),
+        # R2: every trip excluded -> denominator 0, all rates None.
+        ("f", "2026-03-23", "R2", "2026-03-23T09:00:00+00:00", "EXCLUDED"),
+        # R3: scheduled 4, three UNTRACKED and one VANISHED -> rates 0.75 and
+        # 0.25, forbidden sum 1.0, which also catches a clamped-to-1.0 leak.
+        ("g", "2026-03-24", "R3", "2026-03-24T07:00:00+00:00", "UNTRACKED"),
+        ("h", "2026-03-24", "R3", "2026-03-24T07:30:00+00:00", "UNTRACKED"),
+        ("i", "2026-03-24", "R3", "2026-03-24T08:00:00+00:00", "UNTRACKED"),
+        ("j", "2026-03-24", "R3", "2026-03-24T08:30:00+00:00", "VANISHED"),
+    ]
+    conn.executemany("INSERT INTO trip_outcomes VALUES (?,?,?,?,?)", rows)
+    conn.commit()
+    return conn
+
+
+def test_no_combined_rate_key_exists():
+    for row in route_day_rollup(_invariant_db()):
+        for key in row:
+            assert "ghost" not in key, f"combined-rate key reappeared: {key}"
+            assert "combined" not in key, f"combined-rate key reappeared: {key}"
+        assert "ghost_rate" not in row
+        assert "combined_rate" not in row
+        assert "failure_rate" not in row
+
+
+def test_published_rate_keys_are_exactly_the_six_split_fields():
+    assert RATE_KEYS == ("vanished_rate", "vanished_lo", "vanished_hi",
+                         "untracked_rate", "untracked_lo", "untracked_hi")
+    for row in route_day_rollup(_invariant_db()):
+        rate_like = {k for k in row if k.endswith(("_rate", "_lo", "_hi"))}
+        assert rate_like == set(RATE_KEYS), rate_like
+
+
+def test_no_published_field_equals_the_sum_of_the_two_rates():
+    for row in route_day_rollup(_invariant_db()):
+        denom = row["scheduled"] - row["excluded"]
+        if denom <= 0:
+            for key in RATE_KEYS:
+                assert row[key] is None, key
+            continue
+        combined = (row["vanished"] + row["untracked"]) / denom
+        if combined == 0.0:
+            # Both rates are legitimately 0.0 here, so equality proves nothing.
+            continue
+        assert row["vanished_rate"] + row["untracked_rate"] == pytest.approx(combined)
+        for key, value in row.items():
+            if isinstance(value, float):
+                assert value != pytest.approx(combined), (
+                    f"{key} on route {row['route_id']} equals vanished+untracked "
+                    f"({combined}); the two rates must never be summed (D1)")
+
+
+def test_the_two_rates_are_reported_independently():
+    rows = {r["route_id"]: r for r in route_day_rollup(_invariant_db())}
+    r3 = rows["R3"]
+    # Different numerators over the same denominator: proof they are not one
+    # number wearing two names.
+    assert r3["vanished_rate"] == pytest.approx(1 / 4)
+    assert r3["untracked_rate"] == pytest.approx(3 / 4)
+    assert r3["vanished_lo"] != pytest.approx(r3["untracked_lo"])
+    assert r3["vanished_hi"] != pytest.approx(r3["untracked_hi"])

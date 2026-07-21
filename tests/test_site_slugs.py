@@ -88,3 +88,26 @@ def test_slug_map_rejects_an_existing_slug_with_disallowed_characters():
 def test_slug_map_accepts_a_well_formed_existing_slug():
     got = slug_map(["SAFE"], existing={"SAFE": "safe-route-2"})
     assert got == {"SAFE": "safe-route-2"}
+
+
+def test_slug_map_rejects_a_trailing_newline_in_a_published_slug():
+    """Python's "$" also matches before a trailing newline, so "safe\n" passed
+    a check documented as ^[a-z0-9][a-z0-9-]*$. \n is a legal POSIX filename
+    character, so CI would have published a route URL containing a raw newline.
+    The validator uses \Z; do not change it back to $."""
+    with pytest.raises(InvalidSlugError):
+        slug_map(["SAFE"], existing={"SAFE": "safe\n"})
+
+
+@pytest.mark.parametrize("bad", [7, ["a"], {"a": 1}, True])
+def test_slug_map_rejects_non_string_published_slugs(bad):
+    """A doctored or corrupt manifest should name the problem, not blow up
+    inside the regex with a bare TypeError that names neither route nor file."""
+    with pytest.raises(InvalidSlugError):
+        slug_map(["SAFE"], existing={"SAFE": bad})
+
+
+def test_slug_map_treats_a_missing_published_slug_as_no_slug():
+    """None is not corruption - it means "not published yet" and must fall
+    through to a freshly computed slug rather than raising."""
+    assert slug_map(["SAFE"], existing={"SAFE": None}) == {"SAFE": "safe"}

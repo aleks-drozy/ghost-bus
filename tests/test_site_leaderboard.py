@@ -135,6 +135,66 @@ def test_ranking_follows_the_lower_bound_not_the_point_estimate():
     assert [e["route_id"] for e in ranked] == ["ZBIG", "SMALL"]
 
 
+def test_ranking_is_not_raw_vanished_count_or_trip_volume():
+    """A second, structurally different fixture - not a better name for the first one.
+
+    test_ranking_follows_the_lower_bound_not_the_point_estimate proves D2
+    using a point-estimate-vs-lower-bound disagreement (SMALL/ZBIG). That
+    fixture shape can PROVE the board doesn't rank by point estimate, but it
+    can never prove the board doesn't rank by raw vanished count or by trial
+    volume: within any valid point-estimate disagreement, the route with the
+    higher lower bound is mathematically guaranteed to also have more trials
+    (that surplus evidence is exactly what lets its lower point estimate
+    still out-rank the other route), and every case found by a 2,000,000-
+    sample search also had more raw vanished. So a regression to "rank by
+    raw vanished count" or "rank by trial volume" would pass that test by
+    pure coincidence - it is not this repo's job to notice.
+
+    This fixture is built the other way around: a small, high-rate sample
+    against a huge, low-rate one, chosen so the lower-bound-correct answer
+    disagrees with EVERY other candidate key, not just the point estimate.
+
+    ZED_SMALL: 3 vanished of 30    -> rate 10.0000%, Wilson lower bound 3.4599%
+    ACME_BIG:  20 vanished of 5000 -> rate  0.4000%, Wilson lower bound 0.2591%
+
+    raw-count descending   -> ACME_BIG first (20 > 3)      WRONG
+    trials descending      -> ACME_BIG first (5000 > 30)   WRONG
+    alphabetical route_id  -> ACME_BIG first ("A" < "Z")   WRONG
+    point estimate desc    -> ZED_SMALL first (agrees here - not discriminating)
+    lower bound descending -> ZED_SMALL first              CORRECT
+
+    Both routes clear the >=30 judgeable-trips gate (30 and 5000), so both
+    are ranked. If this test is ever deleted as "a duplicate of the other
+    ranking test," the raw-count/trial-volume regression becomes invisible
+    again - that is precisely the gap this fixture exists to cover.
+    """
+    rows = spread("ZED_SMALL", days(1), scheduled=30, vanished=3) + \
+           spread("ACME_BIG", days(1), scheduled=5000, vanished=20)
+    ranked, _ = leaderboard(rows)
+    zed = next(e for e in ranked if e["route_id"] == "ZED_SMALL")
+    acme = next(e for e in ranked if e["route_id"] == "ACME_BIG")
+
+    assert zed["trials"] == 30
+    assert acme["trials"] == 5000
+    assert zed["vanished"] == 3
+    assert acme["vanished"] == 20
+    assert zed["trials"] < acme["trials"]
+    assert zed["vanished"] < acme["vanished"]
+
+    assert zed["vanished_interval"][0] == pytest.approx(0.10, abs=1e-8)
+    assert acme["vanished_interval"][0] == pytest.approx(0.004, abs=1e-8)
+    # Both verified against a 50-digit decimal closed-form Wilson derivation:
+    # ZED_SMALL exact lo = 0.03459925995971616817..., ACME_BIG exact lo =
+    # 0.00259092235074855851... Do not "round these off" - the tolerance
+    # below is already tight enough to catch a real regression.
+    assert zed["vanished_interval"][1] == pytest.approx(0.03459925995971615, abs=1e-8)
+    assert acme["vanished_interval"][1] == pytest.approx(0.0025909223507485585, abs=1e-8)
+    assert zed["vanished_interval"][0] > acme["vanished_interval"][0]
+    assert zed["vanished_interval"][1] > acme["vanished_interval"][1]
+
+    assert [e["route_id"] for e in ranked] == ["ZED_SMALL", "ACME_BIG"]
+
+
 def test_untracked_never_affects_rank():
     """A and B tie on every rank-relevant field except untracked (0 vs 50).
 

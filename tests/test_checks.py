@@ -64,3 +64,70 @@ def test_cli_exit_codes(tmp_path):
     proc = subprocess.run([sys.executable, "run_checks.py", str(dbfile)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_rates_bounded_passes_on_real_rollup_rows():
+    db = make_db(GOOD)
+    result = check_rates_bounded(db)
+    assert result["passed"] and result["violations"] == []
+
+
+def test_rates_bounded_flags_out_of_range_vanished_rate(monkeypatch):
+    import run_checks
+
+    bad = {"route_id": "R1", "service_date": "2026-03-23", "scheduled": 10,
+           "excluded": 0, "cancelled": 0, "completed": 8, "vanished": 1, "untracked": 1,
+           "vanished_rate": 1.5, "vanished_lo": 0.0, "vanished_hi": 1.0,
+           "untracked_rate": 0.1, "untracked_lo": 0.0, "untracked_hi": 0.4}
+    monkeypatch.setattr(run_checks, "route_day_rollup", lambda db: [bad])
+    result = run_checks.check_rates_bounded(None)
+    assert not result["passed"] and result["violations"] == [bad]
+
+
+def test_rates_bounded_flags_out_of_range_untracked_bound(monkeypatch):
+    import run_checks
+
+    bad = {"route_id": "R1", "service_date": "2026-03-23", "scheduled": 10,
+           "excluded": 0, "cancelled": 0, "completed": 8, "vanished": 1, "untracked": 1,
+           "vanished_rate": 0.1, "vanished_lo": 0.0, "vanished_hi": 0.4,
+           "untracked_rate": 0.1, "untracked_lo": -0.2, "untracked_hi": 0.4}
+    monkeypatch.setattr(run_checks, "route_day_rollup", lambda db: [bad])
+    result = run_checks.check_rates_bounded(None)
+    assert not result["passed"] and result["violations"] == [bad]
+
+
+def test_rates_bounded_flags_point_estimate_outside_its_interval(monkeypatch):
+    import run_checks
+
+    bad = {"route_id": "R1", "service_date": "2026-03-23", "scheduled": 10,
+           "excluded": 0, "cancelled": 0, "completed": 8, "vanished": 1, "untracked": 1,
+           "vanished_rate": 0.9, "vanished_lo": 0.0, "vanished_hi": 0.4,
+           "untracked_rate": 0.1, "untracked_lo": 0.0, "untracked_hi": 0.4}
+    monkeypatch.setattr(run_checks, "route_day_rollup", lambda db: [bad])
+    result = run_checks.check_rates_bounded(None)
+    assert not result["passed"] and result["violations"] == [bad]
+
+
+def test_rates_bounded_flags_partially_defined_rates(monkeypatch):
+    import run_checks
+
+    # All six rate fields share one denominator, so they are None together or
+    # populated together. A half-populated row means the rollup is broken.
+    bad = {"route_id": "R1", "service_date": "2026-03-23", "scheduled": 10,
+           "excluded": 0, "cancelled": 0, "completed": 8, "vanished": 1, "untracked": 1,
+           "vanished_rate": 0.1, "vanished_lo": 0.0, "vanished_hi": 0.4,
+           "untracked_rate": None, "untracked_lo": None, "untracked_hi": None}
+    monkeypatch.setattr(run_checks, "route_day_rollup", lambda db: [bad])
+    result = run_checks.check_rates_bounded(None)
+    assert not result["passed"] and result["violations"] == [bad]
+
+
+def test_rates_bounded_passes_when_all_rates_are_null(monkeypatch):
+    import run_checks
+
+    row = {"route_id": "R2", "service_date": "2026-03-23", "scheduled": 1,
+           "excluded": 1, "cancelled": 0, "completed": 0, "vanished": 0, "untracked": 0,
+           "vanished_rate": None, "vanished_lo": None, "vanished_hi": None,
+           "untracked_rate": None, "untracked_lo": None, "untracked_hi": None}
+    monkeypatch.setattr(run_checks, "route_day_rollup", lambda db: [row])
+    assert run_checks.check_rates_bounded(None)["passed"]

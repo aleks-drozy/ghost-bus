@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 
-from aggregate.rollup import route_day_rollup
+from aggregate.rollup import RATE_KEYS, route_day_rollup
 from classify.outcomes import OUTCOMES
 
 
@@ -18,8 +18,27 @@ def check_conservation(db: sqlite3.Connection) -> dict:
 
 
 def check_rates_bounded(db: sqlite3.Connection) -> dict:
-    bad = [r for r in route_day_rollup(db)
-           if r["ghost_rate"] is not None and not 0.0 <= r["ghost_rate"] <= 1.0]
+    """Both published rates in [0,1], each point estimate inside its own interval.
+
+    The vanished and untracked rates are validated independently and are never
+    added together (design decision D1). All six fields share one denominator,
+    so they are either all None or all populated; a mix means the rollup broke.
+    """
+    bad = []
+    for r in route_day_rollup(db):
+        values = [r[key] for key in RATE_KEYS]
+        present = [v for v in values if v is not None]
+        if not present:
+            continue
+        if len(present) != len(values):
+            bad.append(r)
+            continue
+        if any(not 0.0 <= v <= 1.0 for v in present):
+            bad.append(r)
+            continue
+        if not (r["vanished_lo"] <= r["vanished_rate"] <= r["vanished_hi"]
+                and r["untracked_lo"] <= r["untracked_rate"] <= r["untracked_hi"]):
+            bad.append(r)
     return {"check": "rates_bounded", "passed": not bad, "violations": bad}
 
 

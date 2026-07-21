@@ -5,14 +5,37 @@ import datetime as dt
 import sqlite3
 from zoneinfo import ZoneInfo
 
+from aggregate.rates import rate_with_interval
+
 _CLASSES = ("EXCLUDED", "CANCELLED", "COMPLETED", "VANISHED", "UNTRACKED")
 
+# The two published rates, each with its Wilson bounds. VANISHED and UNTRACKED
+# are different claims about the world and are never summed (design decision
+# D1): VANISHED is direct evidence a trip did not complete, UNTRACKED means we
+# could not see it, which is also what a telematics failure looks like.
+_RATED = ("vanished", "untracked")
+RATE_KEYS = ("vanished_rate", "vanished_lo", "vanished_hi",
+             "untracked_rate", "untracked_lo", "untracked_hi")
 
-def _ghost_rate(counts: dict) -> float | None:
+
+def _rates(counts: dict) -> dict:
+    """Both rates over the same denominator: scheduled - excluded.
+
+    Tracker downtime (EXCLUDED) never counts against the operator. When the
+    denominator is <= 0 every rate field is None - all six together, never a
+    mix - because an undefined rate must not be reported as 0.0.
+    """
     denom = counts["scheduled"] - counts["excluded"]
-    if denom <= 0:
-        return None
-    return (counts["untracked"] + counts["vanished"]) / denom
+    out: dict = {}
+    for kind in _RATED:
+        result = rate_with_interval(counts[kind], denom)
+        if result is None:
+            out[f"{kind}_rate"] = None
+            out[f"{kind}_lo"] = None
+            out[f"{kind}_hi"] = None
+        else:
+            out[f"{kind}_rate"], out[f"{kind}_lo"], out[f"{kind}_hi"] = result
+    return out
 
 
 def _rollup(rows, key_fn):
@@ -24,7 +47,7 @@ def _rollup(rows, key_fn):
         entry[row["outcome"].lower()] += 1
     out = []
     for key, counts in sorted(table.items()):
-        counts["ghost_rate"] = _ghost_rate(counts)
+        counts.update(_rates(counts))
         out.append(dict(zip(("route_id",) + (("service_date",) if len(key) == 2 and isinstance(key[1], str) else ("local_hour",)), key)) | counts)
     return out
 

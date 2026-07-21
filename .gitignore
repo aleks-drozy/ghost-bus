@@ -3,5 +3,5 @@ __pycache__/
 .venv/
 .pytest_cache/
 .superpowers/
-data/
+data/probe/
 state/

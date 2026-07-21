@@ -491,6 +491,34 @@ def _daily_table(entry: dict, daily_rows: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def _window_heading(dates: list[str]) -> str:
+    """State the count AND the true calendar span behind it, never just the count.
+
+    `window_dates` returns the days actually PRESENT in the data, not a fixed
+    trailing range (see its own docstring). A gapped publisher - a VM outage,
+    a failed gate, a corrupted file - can make the two disagree by a lot: 28
+    judged days can stretch across 40 calendar days. "Last 28 complete
+    service days" alone reads as "roughly the last month"; a reader would be
+    misled by omission if the evidence actually reached back further than
+    that. The index page's window_line states both for the same reason
+    (D3/D6 honesty); this mirrors that structure rather than inventing a
+    second convention for the same fact.
+
+    Degenerate cases are handled explicitly rather than falling through to a
+    grammatically odd sentence: zero days (defensive - the pre-baseline path
+    never reaches a real route page, since a route only has an entry at all
+    if at least one of its rows fell inside the window) and exactly one day
+    (which has no span to state - "day X to day X" would be noise, not
+    honesty).
+    """
+    count = len(dates)
+    if count == 0:
+        return "No complete service days published yet"
+    if count == 1:
+        return f"Last 1 complete service day, {dates[0]}"
+    return f"Last {count} complete service days, {dates[0]} to {dates[-1]}"
+
+
 def render_route(site_dir, manifest: dict, entry: dict, daily_rows: list[dict],
                  slugs: dict[str, str], position: int | None = None) -> str:
     ranked_route = position is not None
@@ -500,9 +528,7 @@ def render_route(site_dir, manifest: dict, entry: dict, daily_rows: list[dict],
         rank_line = ("not ranked — fewer than 30 trips we could judge in the "
                      "window, so no rate is claimed for this route")
 
-    count = len(window_dates(daily_rows))
-    plural = "" if count == 1 else "s"
-    window_heading = f"Last {count} complete service day{plural}"
+    window_heading = _window_heading(window_dates(daily_rows))
 
     content = load_template("route.html.tmpl", site_dir).substitute(
         route_name=esc(route_label(entry)),

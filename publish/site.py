@@ -350,10 +350,10 @@ def render_board(ranked: list[dict], unranked: list[dict],
         parts.append("<h2>Ranked routes</h2>")
         parts.append(
             '<p class="note">Ordered by the <strong>lower bound</strong> of the vanished '
-            "rate, worst first, so a route sits above another only where the evidence "
-            "supports it. Untracked is shown separately and has no effect on position. "
-            "The two rates are never added together — "
-            '<a href="methodology.html">here is why</a>.</p>'
+            "rate, worst first — a conservative ordering, not a claim that neighbouring "
+            "routes are statistically distinguishable from each other. Untracked is shown "
+            "separately and has no effect on position. The two rates are never added "
+            'together — <a href="methodology.html">here is why</a>.</p>'
         )
         parts.append(
             '<table class="board"><thead><tr>'

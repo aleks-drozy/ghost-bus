@@ -7,12 +7,15 @@ number on the site cannot differ from the number in the downloadable data
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import datetime as dt
 import html
 import json
 import math
 import re
+import shutil
+import sys
 from pathlib import Path
 from string import Template
 
@@ -639,3 +642,133 @@ def render_about_data(site_dir, manifest: dict, data_dir) -> str:
         generated_at=manifest.get("generated_at", ""),
         content=content,
     )
+
+
+class DatasetError(RuntimeError):
+    """The published dataset is not shaped the way publish/dataset.py writes it."""
+
+
+_DATA_FILE = re.compile(r"^\d{4}-\d{2}-\d{2}\.csv$")
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def _copy_dataset(data_dir: Path, dest: Path) -> None:
+    """Copy only files whose shape publish/dataset.py produces.
+
+    An unexpected path under data/ means something other than the publisher
+    wrote there, and we refuse to serve it rather than guess it is harmless: a
+    blanket copy would put attacker-authored HTML on this site's own origin,
+    carried by the legitimate token through the legitimate workflow.
+    """
+    allowed = set()
+    manifest = data_dir / "manifest.json"
+    if manifest.is_file():
+        allowed.add(manifest)
+    for sub in ("daily", "uptime"):
+        directory = data_dir / sub
+        if not directory.is_dir():
+            continue
+        for path in directory.iterdir():
+            if not (path.is_file() and _DATA_FILE.match(path.name)):
+                raise DatasetError(f"unexpected entry in dataset: {path}")
+            allowed.add(path)
+    for path in data_dir.rglob("*"):
+        if path.is_file() and path not in allowed:
+            raise DatasetError(f"unexpected file in dataset: {path}")
+    if dest.exists():
+        shutil.rmtree(dest)
+    for path in sorted(allowed):
+        target = dest / path.relative_to(data_dir)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+
+
+def build_site(data_dir, out_dir, site_dir=SITE_DIR) -> dict:
+    """Render the whole site from the published dataset into out_dir.
+
+    Returns the manifest as written to out_dir, so the id-to-filename mapping
+    is auditable from the site as well as from the dataset.
+
+    Route URLs come from the dataset's own route_slugs map and never from a
+    previous build: CI checks the dataset out beside the code and renders into
+    a brand-new _site every run, so out_dir is always empty when we start.
+    """
+    data_dir = Path(data_dir)
+    out_dir = Path(out_dir)
+    site_dir = Path(site_dir)
+
+    manifest = read_manifest(data_dir)
+    daily_rows = read_daily(data_dir)
+    uptime_rows = read_uptime(data_dir)
+    ready = bool(manifest.get("scoreboard_ready"))
+
+    if not ready and (data_dir / "daily").is_dir():
+        raise DatasetError(
+            "scoreboard_ready is false but data/daily exists - refusing to "
+            "publish route data behind a page that says we publish none")
+
+    ranked: list[dict] = []
+    unranked: list[dict] = []
+    slugs: dict[str, str] = {}
+    if ready:
+        ranked, unranked = leaderboard(daily_rows)
+        # The publisher assigns a slug to every route it publishes, so the map
+        # should already cover all of these; slug_map fills in anything missing
+        # rather than raising mid-build, and never moves a published entry.
+        slugs = slug_map((entry["route_id"] for entry in ranked + unranked),
+                         existing=manifest.get("route_slugs") or {})
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pages = {
+        "index.html": render_index(site_dir, manifest, daily_rows, uptime_rows,
+                                   ranked, unranked, slugs),
+        "methodology.html": render_methodology(site_dir, manifest),
+        "about-data.html": render_about_data(site_dir, manifest, data_dir),
+    }
+    for name, text in pages.items():
+        _write(out_dir / name, text)
+    shutil.copyfile(site_dir / "style.css", out_dir / "style.css")
+
+    route_dir = out_dir / "route"
+    if route_dir.exists():
+        shutil.rmtree(route_dir)
+    if ready:
+        for position, entry in enumerate(ranked, start=1):
+            name = f"{slugs[entry['route_id']]}.html"
+            _write(route_dir / name,
+                   render_route(site_dir, manifest, entry, daily_rows, slugs, position))
+        for entry in unranked:
+            name = f"{slugs[entry['route_id']]}.html"
+            _write(route_dir / name,
+                   render_route(site_dir, manifest, entry, daily_rows, slugs, None))
+
+    _copy_dataset(data_dir, out_dir / "data")
+
+    written = dict(manifest)
+    # The slugs of the pages this build actually emitted. The dataset's own
+    # manifest - copied verbatim to <out>/data/manifest.json - remains the
+    # authority, and carries entries for withdrawn routes too.
+    written["route_slugs"] = slugs
+    _write(out_dir / "manifest.json", json.dumps(written, indent=2, sort_keys=True) + "\n")
+    return written
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Build the Ghost Bus site from published CSVs.")
+    parser.add_argument("--data", default="data", help="published dataset directory")
+    parser.add_argument("--out", default="_site", help="output directory")
+    parser.add_argument("--site", default=str(SITE_DIR), help="template directory")
+    args = parser.parse_args(argv)
+    manifest = build_site(args.data, args.out, args.site)
+    routes = len(manifest.get("route_slugs") or {})
+    ready = manifest.get("scoreboard_ready")
+    print(f"built {args.out}: scoreboard_ready={ready}, {routes} route pages")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

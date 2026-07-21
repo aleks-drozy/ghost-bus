@@ -17,16 +17,17 @@ set +x
 # into the journal. Clear them regardless of what the env file carries.
 unset GIT_TRACE GIT_TRACE_CURL GIT_TRACE_PACKET GIT_CURL_VERBOSE
 
-# The unit has no User=, so this runs as root. A credential.helper configured
-# in /etc/gitconfig (system scope) or root's own ~/.gitconfig would still be
-# consulted by git's post-auth credential_approve() step even though
-# GIT_ASKPASS supplied the password - GIT_ASKPASS only answers the prompt, it
-# does not stop git handing a successful credential to every configured
-# helper's `store` action afterward. GIT_CONFIG_NOSYSTEM removes /etc/gitconfig
-# from consideration entirely; `-c credential.helper=` (an empty value resets
-# the helper list) is applied directly to the two network-touching git
-# invocations below as well, so nothing configured anywhere can persist the
-# token to disk regardless of scope.
+# The unit runs as ubuntu (User=ubuntu - see the unit file), not root, but a
+# credential.helper configured in /etc/gitconfig (system scope) or even
+# ubuntu's own ~/.gitconfig would still be consulted by git's post-auth
+# credential_approve() step even though GIT_ASKPASS supplied the password -
+# GIT_ASKPASS only answers the prompt, it does not stop git handing a
+# successful credential to every configured helper's `store` action
+# afterward. GIT_CONFIG_NOSYSTEM removes /etc/gitconfig from consideration
+# entirely; `-c credential.helper=` (an empty value resets the helper list)
+# is applied directly to the two network-touching git invocations below as
+# well, so nothing configured anywhere can persist the token to disk
+# regardless of scope.
 export GIT_CONFIG_NOSYSTEM=1
 
 REPO_DIR="${GHOSTBUS_REPO_DIR:-/opt/ghost-bus}"
@@ -58,10 +59,12 @@ cd "${REPO_DIR}"
 #    Captured on its own line rather than inline in the `[ -n "$(...)" ]`
 #    test: `set -e` is suppressed for commands inside a condition, and the
 #    command-substitution's own exit status is discarded there regardless -
-#    so a FAILING `git status` (checkout owned by another user under git's
-#    "dubious ownership" check, a stale index.lock, git missing from root's
-#    PATH) previously yielded empty output and let the guard pass open. As a
-#    plain assignment on its own line, `set -e` sees and acts on that failure.
+#    so a FAILING `git status` (git's "dubious ownership" check should no
+#    longer trigger now that the unit runs as ubuntu matching this checkout's
+#    owner - see the unit file - but a stale index.lock or git missing from
+#    ubuntu's PATH still could) previously yielded empty output and let the
+#    guard pass open. As a plain assignment on its own line, `set -e` sees
+#    and acts on that failure.
 DIRTY_STATUS="$(git status --porcelain)"
 if [ -n "${DIRTY_STATUS}" ]; then
   echo "publish: code checkout is dirty - refusing to publish" >&2
@@ -80,6 +83,12 @@ cd "${DATA_REPO}"
 #    otherwise wedge the push. If `main` does not exist yet (the very first
 #    publish, before this repository has any history), there is nothing to
 #    reset to or diverge from.
+#    This hard reset is safe ONLY because publish.dataset rewrites the
+#    dataset in full every run (data/daily, data/uptime, and manifest.json
+#    are each regenerated from the database from scratch, not patched
+#    incrementally) - if that ever changed to an incremental writer that
+#    assumed the previous run's output was still on disk, this reset would
+#    silently discard days between runs before the builder ever saw them.
 HAVE_REMOTE_BASE=1
 if ! git -c credential.helper= fetch "${DATA_REMOTE}" main; then
   HAVE_REMOTE_BASE=0
@@ -106,16 +115,26 @@ env -u GHOSTBUS_PUBLISH_TOKEN "${PY}" -m publish.dataset --db "${DB_PATH}" --dat
 
 cd "${DATA_REPO}"
 
-# 4. Stage only the dataset paths that exist. "Dataset-only" is a promise
-#    this script keeps itself, not an assumption about what else lives in
-#    this checkout - so we name every path explicitly rather than staging the
-#    whole tree. data/daily does not exist until the 14-day baseline gate is
-#    met (spec D6 keeps uptime + manifest exempt so they publish from day
-#    one) - `git add` is fatal on an unmatched pathspec, so every path is
-#    checked for existence first rather than assumed.
+# 4. Stage only the dataset paths that exist OR are still tracked.
+#    "Dataset-only" is a promise this script keeps itself, not an assumption
+#    about what else lives in this checkout - so we name every path
+#    explicitly rather than staging the whole tree. data/daily does not
+#    exist until the 14-day baseline gate is met (spec D6 keeps uptime +
+#    manifest exempt so they publish from day one) - `git add` is fatal on
+#    an unmatched pathspec, so a path absent from disk AND the index is
+#    skipped. But a path that publish/dataset.py has just rmtree'd because
+#    coverage fell back below baseline (dataset.py:393-397's WITHDRAWAL rule
+#    - published route data must come down, not sit next to a page saying we
+#    publish nothing about any route) is absent from disk while still
+#    tracked in the index - `git ls-files` still finds it, and `git add` on a
+#    missing-but-tracked path stages the deletion. Checking existence alone
+#    would skip that path, the deletion would never be staged, and the
+#    withdrawn CSVs would stay live on the public repo forever (each run's
+#    fetch+reset would restore them from the remote, dataset.py would delete
+#    them again, and the guard would skip them again).
 STAGE_PATHS=()
 for p in data/daily data/uptime data/manifest.json; do
-  if [ -e "${p}" ]; then
+  if [ -e "${p}" ] || [ -n "$(git ls-files -- "${p}")" ]; then
     STAGE_PATHS+=("${p}")
   fi
 done

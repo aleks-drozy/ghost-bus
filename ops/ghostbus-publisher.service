@@ -8,6 +8,15 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# /opt/ghost-bus is chowned to ubuntu at install time (RUNBOOK 2), so running
+# as ubuntu rather than the systemd default of root does two things at once:
+# it makes the checkout's owner match the process's UID, so git's "dubious
+# ownership" check never fires in the first place (no safe.directory
+# workaround needed) - and it shrinks the blast radius of the one credential
+# on this VM that can write to GitHub. EnvironmentFile is still read by
+# systemd itself before the process starts, so /etc/ghostbus.env staying
+# root:root mode 600 is unaffected.
+User=ubuntu
 WorkingDirectory=/opt/ghost-bus
 EnvironmentFile=/etc/ghostbus.env
 ExecStart=/opt/ghost-bus/ops/publish.sh

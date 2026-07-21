@@ -68,8 +68,13 @@ def test_publish_script_never_reads_the_token(publish):
     test required the token's name to be wholly absent, which `env -u` (a
     security improvement, not a leak) directly contradicts; the actual
     property is "never expanded", not "never mentioned".
+
+    NEW-5: checking only the braced form `${GHOSTBUS_PUBLISH_TOKEN}` would
+    have let the unbraced expansion `$GHOSTBUS_PUBLISH_TOKEN` (bash treats
+    both identically) straight through undetected. Both are checked.
     """
     assert "${GHOSTBUS_PUBLISH_TOKEN}" not in publish
+    assert "$GHOSTBUS_PUBLISH_TOKEN" not in publish
     assert "env -u GHOSTBUS_PUBLISH_TOKEN" in publish
 
 
@@ -103,12 +108,15 @@ def test_network_git_commands_disable_credential_helper_persistence(publish):
     invocation - it does not stop git from also handing a successful
     credential to every configured credential.helper's `store` action
     afterward (credential_approve() runs regardless of where the credential
-    came from). The unit has no User=, so this runs as root; a
-    credential.helper configured in /etc/gitconfig or root's own
-    ~/.gitconfig would otherwise write the token in plaintext to
-    /root/.git-credentials on the first successful push. GIT_CONFIG_NOSYSTEM
-    removes /etc/gitconfig from consideration entirely; `-c credential.helper=`
-    (empty resets the helper list) is applied directly to fetch and push.
+    came from, or which account the process runs as - originally found when
+    the unit ran as root with no User=; NEW-2 later added User=ubuntu, which
+    changes WHICH account's config matters but not whether an unneutralised
+    helper would still fire). A credential.helper configured in
+    /etc/gitconfig (system scope) or the running account's own ~/.gitconfig
+    would otherwise write the token in plaintext to ~/.git-credentials on
+    the first successful push. GIT_CONFIG_NOSYSTEM removes /etc/gitconfig
+    from consideration entirely; `-c credential.helper=` (empty resets the
+    helper list) is applied directly to fetch and push.
     """
     assert "GIT_CONFIG_NOSYSTEM=1" in publish
     assert publish.count("-c credential.helper=") >= 2
@@ -179,6 +187,21 @@ def test_service_runs_after_the_classifier_and_the_network():
     text = SERVICE.read_text(encoding="utf-8")
     assert "ghostbus-classifier.service" in text
     assert "network-online.target" in text
+
+
+def test_service_runs_as_ubuntu_not_root():
+    """NEW-2: /opt/ghost-bus is chowned to ubuntu at install time (RUNBOOK
+    2); running the publisher as ubuntu rather than the systemd default of
+    root makes the checkout's owner match the process's UID (so git's
+    "dubious ownership" check cannot fire, without needing a safe.directory
+    workaround - which GIT_CONFIG_NOSYSTEM in publish.sh would block from
+    system scope anyway) and shrinks the blast radius of the one credential
+    on this VM able to write to GitHub. EnvironmentFile is read by systemd
+    itself before the process starts, so this doesn't require /etc/ghostbus.env
+    to be readable by ubuntu.
+    """
+    text = SERVICE.read_text(encoding="utf-8")
+    assert "User=ubuntu" in text
 
 
 def test_timer_runs_once_a_day_after_the_service_day_closes():
@@ -255,7 +278,14 @@ if exit_code != 0:
 date = os.environ.get("STUB_DATE", "2026-07-20")
 d = pathlib.Path(data_dir)
 
-if not os.environ.get("STUB_SKIP_DAILY"):
+if os.environ.get("STUB_WITHDRAW_DAILY"):
+    # Mirrors publish/dataset.py:393-397 exactly: an ACTIVE rmtree, not
+    # merely skipping creation - the NEW-1 regression needs data/daily to
+    # have existed (restored by publish.sh's own fetch+reset from a prior
+    # publish) and then be removed by this run, not simply never created.
+    import shutil as _shutil
+    _shutil.rmtree(d / "daily", ignore_errors=True)
+elif not os.environ.get("STUB_SKIP_DAILY"):
     (d / "daily").mkdir(parents=True, exist_ok=True)
     (d / "daily" / (date + ".csv")).write_text("route,otp\\n1,0.9\\n")
 
@@ -354,6 +384,20 @@ class Sandbox:
         )
         return {line for line in result.stdout.split() if line}
 
+    def remote_tree_files(self, ref: str = "main") -> set:
+        """Every path present in ref's actual tree right now - not just what
+        changed in the latest commit's diff. `remote_files()` (git show
+        --stat) is only equivalent to "the whole published tree" for a
+        first-ever commit; for anything after that it only shows this
+        commit's delta, which is the wrong question for "is this path truly
+        gone from what's published" (NEW-1).
+        """
+        result = subprocess.run(
+            ["git", "--git-dir", str(self.remote), "ls-tree", "-r", "--name-only", ref],
+            capture_output=True, text=True,
+        )
+        return {line for line in result.stdout.split() if line}
+
     def remote_all_history_files(self) -> set:
         """Every path that has ever appeared in any commit ever pushed - to
         prove a file never rode along on ANY push, not just the latest.
@@ -439,6 +483,58 @@ def test_pre_baseline_shape_publishes_uptime_and_manifest_only(sandbox):
     assert result.returncode == 0, result.stderr
     assert sandbox.remote_commit_count() == 1
     assert sandbox.remote_files() == {"data/uptime/2026-07-20.csv", "data/manifest.json"}
+
+
+def test_withdrawn_daily_data_disappears_from_the_remote(sandbox):
+    """NEW-1 (blocker): publish/dataset.py:393-397 rmtree's data/daily when
+    coverage falls back below the 14-day baseline - spec D6's WITHDRAWAL
+    rule, that previously published route data must come down rather than
+    sit next to a page saying we publish nothing about any route. The
+    `[ -e ]`-only staging guard (I2's fix) skips a path that no longer
+    exists, so the DELETION was never staged: withdrawn CSVs stayed live on
+    the public repo forever, and the bug was self-perpetuating - each run's
+    fetch+reset restores data/daily from the remote, the builder deletes it
+    again, and the guard skips it again.
+
+    Publish a post-baseline dataset (data/daily present), then run again
+    with the stub withdrawing data/daily exactly as dataset.py does
+    (STUB_WITHDRAW_DAILY - an active rmtree, not merely skipping creation),
+    and confirm the remote's actual tree - not just the latest commit's
+    diff - no longer carries any data/daily/ entry at all.
+    """
+    first = sandbox.run(env_overrides={"STUB_DATE": "2026-07-20"})
+    assert first.returncode == 0, first.stderr
+    assert sandbox.remote_tree_files() == {
+        "data/daily/2026-07-20.csv",
+        "data/uptime/2026-07-20.csv",
+        "data/manifest.json",
+    }
+
+    second = sandbox.run(env_overrides={"STUB_DATE": "2026-07-21", "STUB_WITHDRAW_DAILY": "1"})
+    assert second.returncode == 0, second.stderr
+    assert sandbox.remote_commit_count() == 2
+
+    # The property NEW-1 is about: data/daily must be entirely gone. (Not
+    # asserting the exact uptime file set here - the stub writes one
+    # date-named uptime CSV per run and never prunes old ones, which isn't
+    # how the real rolling uptime window behaves; that's a stub simplification,
+    # not a publish.sh staging property.)
+    tree_now = sandbox.remote_tree_files()
+    assert not any(f.startswith("data/daily/") for f in tree_now), tree_now
+    assert "data/manifest.json" in tree_now
+
+
+def test_pre_baseline_shape_still_publishes_after_the_withdrawal_fix(sandbox):
+    """NEW-1's fix (staging a path that's merely tracked-but-missing, via
+    `git ls-files`) must not undo I2: a path that was NEVER tracked to begin
+    with (true pre-baseline - data/daily has never existed in this
+    checkout's history at all) must still be skipped, not staged as a
+    phantom deletion. `git ls-files -- data/daily` on a path with no history
+    returns nothing either, so the two guards agree here.
+    """
+    result = sandbox.run(env_overrides={"STUB_SKIP_DAILY": "1"})
+    assert result.returncode == 0, result.stderr
+    assert sandbox.remote_tree_files() == {"data/uptime/2026-07-20.csv", "data/manifest.json"}
 
 
 def test_gitignore_excludes_the_nested_data_repo_checkout():
@@ -529,9 +625,11 @@ def test_dirty_guard_fails_closed_when_git_status_itself_fails(sandbox):
     by deleting REPO_DIR's own `.git` so `git status` itself errors, while
     leaving DATA_REPO and the remote fully valid - so if the guard fails
     open, nothing else stops a complete, successful publish. Real triggers
-    in production: the checkout chowned to `ubuntu` while the unit runs as
-    root (git's "dubious ownership" check), a stale index.lock, or git
-    missing from root's PATH.
+    in production: a stale index.lock, or git missing from ubuntu's PATH
+    (NEW-2's User=ubuntu means the checkout-ownership mismatch that used to
+    make "dubious ownership" a likely trigger here shouldn't occur anymore,
+    but the guard must still fail closed for whatever reason git status
+    fails, not just that one).
     """
     def _force_remove(func, path, exc_info):
         # Git marks object files read-only on Windows; retry after clearing it.
@@ -555,26 +653,46 @@ def test_dirty_guard_fails_closed_when_git_status_itself_fails(sandbox):
 
 
 def test_askpass_refuses_hosts_other_than_github():
-    """M1: even if GHOSTBUS_DATA_REMOTE is ever repointed at a non-GitHub
-    host (misconfiguration, or an attacker who can only change env vars and
-    not this file), the token must stay unusable there.
+    """M1 (escalated from Minor to blocker): a bare substring test
+    (`*github.com*`) is defeated by any of three values, all reproduced end
+    to end by the reviewer against a live git exchange - the third actually
+    delivered the token to a localhost server:
+      - a lookalike hostname:  'https://github.com.evil.example'
+      - a query string mention: 'https://evil.example/?ref=github.com'
+      - github.com as fake userinfo ahead of the real host:
+        'http://github.com@127.0.0.1:8731/...' (git's prompt for this is
+        "...for 'http://github.com@127.0.0.1:8731': ")
+    The anchored match (host must be the last thing before the closing
+    quote) rejects all three and still accepts the two legitimate forms
+    (with and without an embedded username).
     """
     env = os.environ.copy()
     env["GHOSTBUS_PUBLISH_TOKEN"] = "shhh"
 
-    ok = subprocess.run(
-        [_find_bash(), _posix(ASKPASS_SH), "Password for 'https://x-access-token@github.com': "],
-        env=env, capture_output=True, text=True,
-    )
-    assert ok.returncode == 0
-    assert ok.stdout == "shhh"
+    def ask(prompt):
+        return subprocess.run(
+            [_find_bash(), _posix(ASKPASS_SH), prompt],
+            env=env, capture_output=True, text=True,
+        )
 
-    bad = subprocess.run(
-        [_find_bash(), _posix(ASKPASS_SH), "Password for 'https://evil.example.com': "],
-        env=env, capture_output=True, text=True,
-    )
-    assert bad.returncode != 0
-    assert bad.stdout == ""
+    defeating_prompts = [
+        "Password for 'https://github.com.evil.example': ",
+        "Password for 'https://evil.example/?ref=github.com': ",
+        "Password for 'http://github.com@127.0.0.1:8731': ",
+    ]
+    for prompt in defeating_prompts:
+        result = ask(prompt)
+        assert result.returncode != 0, prompt
+        assert result.stdout == "", prompt
+
+    legitimate_prompts = [
+        "Password for 'https://x-access-token@github.com': ",
+        "Username for 'https://github.com': ",
+    ]
+    for prompt in legitimate_prompts:
+        result = ask(prompt)
+        assert result.returncode == 0, prompt
+        assert result.stdout == "shhh", prompt
 
 
 def test_ops_files_use_unix_line_endings():

@@ -436,3 +436,102 @@ def render_index(site_dir, manifest: dict, daily_rows: list[dict],
         generated_at=manifest.get("generated_at", ""),
         content=content,
     )
+
+
+def _daily_table(entry: dict, daily_rows: list[dict]) -> str:
+    """One row per calendar day across the window.
+
+    Counts only - a single service day is a sample of a few dozen trips at
+    best, and putting a percentage on it would be the same overclaim the
+    30-trip gate exists to prevent. Days we did not publish are gap rows: no
+    numbers, no interpolation.
+    """
+    dates = window_dates(daily_rows)
+    if not dates:
+        return '<p class="note">No complete service days published yet.</p>'
+    by_date = {
+        row["service_date"]: row
+        for row in daily_rows
+        if row["route_id"] == entry["route_id"]
+    }
+    start = dt.date.fromisoformat(dates[0])
+    end = dt.date.fromisoformat(dates[-1])
+
+    parts = [
+        '<table class="days"><thead><tr>'
+        '<th>Day</th><th class="num">Trips judged</th>'
+        '<th class="num">Vanished</th><th class="num">Untracked</th>'
+        '<th class="num">Cancelled</th><th class="num">Completed</th>'
+        "</tr></thead><tbody>"
+    ]
+    day = end
+    while day >= start:
+        iso = day.isoformat()
+        row = by_date.get(iso)
+        if row is None:
+            parts.append(
+                f'<tr class="gap"><td>{esc(iso)}</td>'
+                '<td colspan="5">no data published for this day</td></tr>'
+            )
+        else:
+            trials = row["scheduled"] - row["excluded"]
+            title = f"{row['scheduled']} scheduled, {row['excluded']} excluded"
+            parts.append(
+                "<tr>"
+                f"<td>{esc(iso)}</td>"
+                f'<td class="num" title="{esc(title)}">{esc(trials)}</td>'
+                f'<td class="num">{esc(row["vanished"])}</td>'
+                f'<td class="num">{esc(row["untracked"])}</td>'
+                f'<td class="num">{esc(row["cancelled"])}</td>'
+                f'<td class="num">{esc(row["completed"])}</td>'
+                "</tr>"
+            )
+        day -= dt.timedelta(days=1)
+    parts.append("</tbody></table>")
+    return "\n".join(parts)
+
+
+def render_route(site_dir, manifest: dict, entry: dict, daily_rows: list[dict],
+                 slugs: dict[str, str], position: int | None = None) -> str:
+    ranked_route = position is not None
+    if ranked_route:
+        rank_line = f"ranked #{position} by the lower bound of the vanished rate"
+    else:
+        rank_line = ("not ranked — fewer than 30 trips we could judge in the "
+                     "window, so no rate is claimed for this route")
+
+    count = len(window_dates(daily_rows))
+    plural = "" if count == 1 else "s"
+    window_heading = f"Last {count} complete service day{plural}"
+
+    content = load_template("route.html.tmpl", site_dir).substitute(
+        route_name=esc(route_label(entry)),
+        route_long=esc(entry.get("route_long_name") or ""),
+        route_id=esc(entry["route_id"]),
+        agency=esc(entry.get("agency_name") or "operator not named in the timetable"),
+        rank_line=esc(rank_line),
+        window_heading=esc(window_heading),
+        trials=esc(entry["trials"]),
+        scheduled=esc(entry["scheduled"]),
+        excluded=esc(entry["excluded"]),
+        cancelled=esc(entry["cancelled"]),
+        completed=esc(entry["completed"]),
+        vanished_count=esc(entry["vanished"]),
+        untracked_count=esc(entry["untracked"]),
+        # Below the gate the headline percentage is withheld, because the index
+        # tells readers no rate is claimed for these routes. The interval stays:
+        # at small n its width is the honest signal.
+        vanished_rate=fmt_rate(entry["vanished_interval"]) if ranked_route else EM_DASH,
+        vanished_interval=fmt_interval(entry["vanished_interval"]),
+        untracked_rate=fmt_rate(entry["untracked_interval"]) if ranked_route else EM_DASH,
+        untracked_interval=fmt_interval(entry["untracked_interval"]),
+        daily_table=_daily_table(entry, daily_rows),
+    )
+    return render_page(
+        site_dir,
+        title=f"Route {route_label(entry)}",
+        root="../",
+        current="",
+        generated_at=manifest.get("generated_at", ""),
+        content=content,
+    )

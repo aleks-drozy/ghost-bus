@@ -87,6 +87,19 @@ def test_about_data_lists_unnamed_routes(tmp_path):
     assert "ZZ 9" in html
 
 
+def test_about_data_escapes_a_hostile_unnamed_route_id(tmp_path):
+    # unnamed_routes is a list of raw route ids straight from the operator's
+    # feed (see publish/dataset.py:unnamed_routes) - render_page's content= is
+    # unescaped by convention, so this string must be escaped at the render
+    # site or a hostile route id becomes live markup on a public page.
+    data = write_dataset(tmp_path / "data")
+    manifest = dict(DEFAULT_MANIFEST)
+    manifest["unnamed_routes"] = ['<script>alert(1)</script>"']
+    html = render_about_data(SITE_DIR, manifest, data)
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;&quot;" in html
+
+
 def test_about_data_says_none_when_no_unnamed_routes(tmp_path):
     data = write_dataset(tmp_path / "data")
     html = render_about_data(SITE_DIR, DEFAULT_MANIFEST, data)

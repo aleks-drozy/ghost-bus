@@ -603,6 +603,12 @@ def render_about_data(site_dir, manifest: dict, data_dir) -> str:
         if not unnamed
         else ", ".join(f"<code>{esc(route_id)}</code>" for route_id in unnamed)
     )
+    agencies = manifest.get("agencies") or []
+    agencies_html = (
+        "none configured"
+        if not agencies
+        else ", ".join(esc(name) for name in agencies)
+    )
 
     def shown(value) -> str:
         # `or EM_DASH`, not a .get default: the manifest publishes JSON nulls
@@ -622,6 +628,7 @@ def render_about_data(site_dir, manifest: dict, data_dir) -> str:
         observations=esc(counts.get("observations", 0)),
         trips_classified=esc(counts.get("trips_classified", 0)),
         unnamed_routes=unnamed_html,
+        agencies=agencies_html,
         csv_links=_csv_links(data_dir),
     )
     return render_page(

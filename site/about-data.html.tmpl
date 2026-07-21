@@ -3,6 +3,7 @@
 
 <h2>This release</h2>
 <dl class="facts">
+<dt>Operators in scope</dt><dd>${agencies}</dd>
 <dt>Schema version</dt><dd>${schema_version}</dd>
 <dt>Generated at</dt><dd>${generated_at}</dd>
 <dt>Timetable hash</dt><dd><code>${timetable_hash}</code></dd>
@@ -13,6 +14,7 @@
 <dt>Trips classified</dt><dd>${trips_classified}</dd>
 <dt>Routes present in the outcomes but absent from the timetable's route table</dt><dd>${unnamed_routes}</dd>
 </dl>
+<p class="note">Only trips run by the operators in scope above are ever scheduled or classified at all — that list is a configuration setting, not something derived from the feed, and every claim of “every scheduled trip” elsewhere on this site means every trip of those operators.</p>
 <p class="note">Routes missing from the timetable's route table are shown by their raw route id rather than a name. We list them here rather than dropping them, because a route we cannot name is still a route we counted.</p>
 
 <h2>Files</h2>

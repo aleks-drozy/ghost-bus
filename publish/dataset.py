@@ -18,7 +18,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from aggregate.rollup import route_day_rollup
-from ghostbus_config import get_db
+from ghostbus_config import get_db, read_agency_names
 from publish.slugs import slug_map
 from run_checks import check_conservation, check_outcomes_valid, check_rates_bounded
 
@@ -333,6 +333,12 @@ def build_manifest(db: sqlite3.Connection, days: list[str], gate: dict,
         "gate": {"conservation": gate["conservation"],
                  "rates_bounded": gate["rates_bounded"],
                  "outcomes_valid": gate["outcomes_valid"]},
+        # The configured operator allow-list, not something derived from the
+        # feed: scheduled_trips (timetable/gtfs.py) only ever schedules trips
+        # for these agencies in the first place, so "every scheduled trip"
+        # elsewhere on the site means every trip of THESE operators, not every
+        # bus in the country. Published here so about-data.html can say so.
+        "agencies": sorted(read_agency_names()),
         # The poller archives exactly one snapshot per successful poll, and
         # writes an ok=1 heartbeat in the same step, so ok heartbeats are the
         # snapshot count without walking the archive directory.

@@ -294,7 +294,11 @@ This sequence starts coordinate capture soonest:
    set `GHOSTBUS_MATCH_RADIUS_M` in `/etc/ghostbus.env` (metres, default
    `250`) — the classifier is a `oneshot` unit and rereads the env file
    fresh on every run, so no service restart is needed for this to take
-   effect either.
+   effect either. **If you change this value, update the "250 metres today"
+   figure in `site/methodology.html.tmpl` in the same change** — CI only
+   pins the code's *default* (`DEFAULT_MATCH_RADIUS_M`), not this env
+   override, so a retune here leaves the published methodology page wrong
+   with no test to catch it.
 
 5. Time the first post-deploy classifier run as a sanity check on VM CPU —
    geographic matching adds real per-trip compute (haversine over every

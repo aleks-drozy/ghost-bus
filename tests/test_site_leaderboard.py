@@ -107,30 +107,43 @@ def test_ranking_follows_the_lower_bound_not_the_point_estimate():
     vs-lower-bound disagreement (a route with a LOWER point estimate ranked
     WORSE by lower bound) requires the winner to have more trials than the
     loser - that is precisely the mechanism that lets a lower observed rate
-    still win: a bigger sample is judged with less uncertainty penalty. A
-    2,000,000-sample randomized search (n1 in [30,500], n2 in [n1+1,3000])
-    for a counterexample - winner with fewer trials AND fewer raw vanished
-    than the loser, while still having the lower point estimate - found zero.
-    So trials-descending and raw-count-descending cannot be defeated by this
-    test without destroying the disagreement it exists to prove; only the
-    alphabetical coincidence was ever fixable, and it is fixed above.
+    still win: a bigger sample is judged with less uncertainty penalty.
+
+    This is a THEOREM, not an observation - do not go hunting for a fixture
+    that defeats it. Wilson's lo is the smaller root of
+    G(p) = (k - n*p)**2 - z**2 * n * p * (1-p), an upward parabola with roots
+    [lo, hi]. Sign-checking dG at p=lo gives three monotonicity facts:
+    lo strictly increases in k at fixed n; lo strictly increases in n at
+    fixed rate; lo strictly DECREASES in n at fixed raw count k>=1. Let the
+    winner be the route with the higher lo and the loser the one with the
+    higher point estimate. If n_win <= n_los then lo_win <= L(p_win, n_los)
+    < lo_los, a contradiction, so n_win > n_los. If then k_win <= k_los,
+    lo_win <= M(k_los, n_win) < lo_los by the third fact, another
+    contradiction, so k_win > k_los. Both strictly.
+
+    So trials-descending and raw-count-descending CANNOT be defeated by any
+    disagreement fixture - not for want of a cleverer one. Only the
+    alphabetical coincidence was ever fixable here, and it is fixed above;
+    the raw-count and trial-volume guards live in
+    test_ranking_is_not_raw_vanished_count_or_trip_volume, which is why that
+    second fixture is necessary rather than redundant.
     """
     rows = spread("SMALL", days(1), scheduled=30, vanished=2) + \
            spread("ZBIG", days(1), scheduled=200, vanished=8)
     ranked, _ = leaderboard(rows)
     small = next(e for e in ranked if e["route_id"] == "SMALL")
-    big = next(e for e in ranked if e["route_id"] == "ZBIG")
+    zbig = next(e for e in ranked if e["route_id"] == "ZBIG")
 
     assert small["vanished_interval"][0] == pytest.approx(0.06666667, abs=1e-8)
-    assert big["vanished_interval"][0] == pytest.approx(0.04, abs=1e-8)
+    assert zbig["vanished_interval"][0] == pytest.approx(0.04, abs=1e-8)
     assert small["vanished_interval"][1] == pytest.approx(0.01847664, abs=1e-8)
     # Verified against a 50-digit decimal closed-form Wilson derivation:
     # exact lo = 0.02040538715065640445... Do not "correct" this back to
     # 0.02040540 - that figure was a rounding slip in the original plan, off
     # by 1.3e-8 (exceeds this assertion's own abs=1e-8 tolerance).
-    assert big["vanished_interval"][1] == pytest.approx(0.02040538715065641, abs=1e-8)
-    assert small["vanished_interval"][0] > big["vanished_interval"][0]
-    assert small["vanished_interval"][1] < big["vanished_interval"][1]
+    assert zbig["vanished_interval"][1] == pytest.approx(0.02040538715065641, abs=1e-8)
+    assert small["vanished_interval"][0] > zbig["vanished_interval"][0]
+    assert small["vanished_interval"][1] < zbig["vanished_interval"][1]
 
     assert [e["route_id"] for e in ranked] == ["ZBIG", "SMALL"]
 
@@ -143,12 +156,12 @@ def test_ranking_is_not_raw_vanished_count_or_trip_volume():
     fixture shape can PROVE the board doesn't rank by point estimate, but it
     can never prove the board doesn't rank by raw vanished count or by trial
     volume: within any valid point-estimate disagreement, the route with the
-    higher lower bound is mathematically guaranteed to also have more trials
-    (that surplus evidence is exactly what lets its lower point estimate
-    still out-rank the other route), and every case found by a 2,000,000-
-    sample search also had more raw vanished. So a regression to "rank by
-    raw vanished count" or "rank by trial volume" would pass that test by
-    pure coincidence - it is not this repo's job to notice.
+    higher lower bound is PROVABLY guaranteed to have both more trials and
+    more raw vanished (that surplus evidence is exactly what lets its lower
+    point estimate still out-rank the other route). The proof is in that
+    test's docstring. So a regression to "rank by raw vanished count" or
+    "rank by trial volume" passes that test by pure coincidence, and no
+    reworking of it can close the gap - which is why this fixture exists.
 
     This fixture is built the other way around: a small, high-rate sample
     against a huge, low-rate one, chosen so the lower-bound-correct answer

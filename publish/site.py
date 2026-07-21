@@ -648,7 +648,37 @@ class DatasetError(RuntimeError):
     """The published dataset is not shaped the way publish/dataset.py writes it."""
 
 
+class OutputDirError(RuntimeError):
+    """out_dir exists, is non-empty, and was not built by this tool.
+
+    build_site deletes and recreates <out_dir>/data and <out_dir>/route on
+    every run. Nothing about out_dir proves it is safe to do that to: a typo
+    or a careless --out (e.g. "--out ." from the repo root, where out_dir/data
+    IS the published dataset) would silently destroy whatever was already
+    there. An operator can always empty a directory themselves; they cannot
+    un-delete it, so every ambiguous case here raises instead of deleting.
+    """
+
+
 _DATA_FILE = re.compile(r"^\d{4}-\d{2}-\d{2}\.csv$")
+_SENTINEL = ".ghost-bus-site"
+
+
+def _claim_output_dir(out_dir: Path) -> None:
+    """Refuse to build into a directory this tool did not create.
+
+    A directory qualifies if it does not exist yet, is empty, or already
+    carries the sentinel this function's caller writes on every successful
+    build (a previous build by this same tool, safe to overwrite). Anything
+    else - a real project directory, an unrelated non-empty folder, the
+    published dataset's own directory - is left untouched and raises.
+    """
+    if out_dir.exists() and any(out_dir.iterdir()) and not (out_dir / _SENTINEL).is_file():
+        raise OutputDirError(
+            f"refusing to build into {out_dir}: it already exists, is not "
+            f"empty, and has no {_SENTINEL} sentinel, so this tool cannot "
+            "tell it apart from a directory it does not own. Point --out at "
+            "a fresh or empty directory, or delete this one yourself first.")
 
 
 def _write(path: Path, text: str) -> None:
@@ -696,10 +726,16 @@ def build_site(data_dir, out_dir, site_dir=SITE_DIR) -> dict:
     Route URLs come from the dataset's own route_slugs map and never from a
     previous build: CI checks the dataset out beside the code and renders into
     a brand-new _site every run, so out_dir is always empty when we start.
+
+    out_dir must be fresh, empty, or already ours (see _claim_output_dir):
+    this function deletes and recreates <out_dir>/data and <out_dir>/route,
+    and will not do that to a directory it cannot prove it created.
     """
     data_dir = Path(data_dir)
     out_dir = Path(out_dir)
     site_dir = Path(site_dir)
+
+    _claim_output_dir(out_dir)
 
     manifest = read_manifest(data_dir)
     daily_rows = read_daily(data_dir)
@@ -754,6 +790,11 @@ def build_site(data_dir, out_dir, site_dir=SITE_DIR) -> dict:
     # authority, and carries entries for withdrawn routes too.
     written["route_slugs"] = slugs
     _write(out_dir / "manifest.json", json.dumps(written, indent=2, sort_keys=True) + "\n")
+
+    # Marks out_dir as ours, so the NEXT build (this is what makes rebuilding
+    # into the same out_dir on a persistent dev machine work) is recognised as
+    # a rebuild rather than refused as a foreign directory.
+    (out_dir / _SENTINEL).write_text("", encoding="utf-8")
     return written
 
 

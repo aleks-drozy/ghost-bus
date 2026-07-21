@@ -6,8 +6,8 @@ import pytest
 
 from tests.site_fixtures import daily_row, uptime_row, write_dataset
 
-from publish.site import (DatasetError, build_site, leaderboard, read_daily,
-                          render_board)
+from publish.site import (DatasetError, OutputDirError, build_site, leaderboard,
+                          read_daily, render_board)
 from publish.slugs import slug_map
 
 GOLDEN = Path(__file__).parent / "golden" / "index_board.html"
@@ -131,21 +131,30 @@ def test_route_urls_are_identical_across_two_fresh_output_directories(tmp_path):
 
     The stable-URL guarantee has to come from the dataset, which is checked
     out, and not from the previous build, which on a fresh runner does not
-    exist. Rebuilding into ONE reused out_dir would pass even if the map were
-    read back out of the site's own output - that is exactly the bug this pins,
-    so the two builds must go to two different, previously nonexistent dirs.
+    exist. Two builds must go to two different, previously nonexistent dirs -
+    that models a runner that never carries _site between runs.
+
+    Asserting only that the two builds AGREE with each other is not enough:
+    slug_map is a pure function of the route-id list, so two builds fed the
+    same ids without `existing=` would recompute the same WRONG assignment
+    and agree perfectly. That agreement is implied by determinism alone and
+    does not distinguish "sourced from the published map" from "recomputed
+    every time, coincidentally identical". incumbent_dataset publishes
+    "03C/120/e/a" -> "03c-120-e-a"; a fresh recomputation (ids sorted, no
+    existing=) would instead give the bare slug to "03C 120 e a" (space
+    0x20 sorts before slash 0x2F) and bump the incumbent to "-2". Asserting
+    the actual pairing, not just cross-run equality, is what catches that.
     """
     data = incumbent_dataset(tmp_path)
-
-    def route_files(out):
-        return sorted(p.name for p in (out / "route").iterdir())
 
     first = build_site(data, tmp_path / "run-1")
     second = build_site(data, tmp_path / "run-2")
 
-    assert first["route_slugs"] == second["route_slugs"]
-    assert route_files(tmp_path / "run-1") == route_files(tmp_path / "run-2")
-    assert "03c-120-e-a.html" in route_files(tmp_path / "run-1")
+    for out, written in ((tmp_path / "run-1", first), (tmp_path / "run-2", second)):
+        assert written["route_slugs"]["03C/120/e/a"] == "03c-120-e-a"
+        assert written["route_slugs"]["03C 120 e a"] == "03c-120-e-a-2"
+        assert (out / "route" / "03c-120-e-a.html").is_file()
+        assert (out / "route" / "03c-120-e-a-2.html").is_file()
 
 
 def test_build_site_is_idempotent(tmp_path):
@@ -155,6 +164,50 @@ def test_build_site_is_idempotent(tmp_path):
     first = (out / "index.html").read_text(encoding="utf-8")
     build_site(data, out)
     assert (out / "index.html").read_text(encoding="utf-8") == first
+
+
+def test_build_site_writes_a_sentinel_marking_the_dir_as_ours(tmp_path):
+    data = ready_dataset(tmp_path)
+    out = tmp_path / "_site"
+    build_site(data, out)
+    assert (out / ".ghost-bus-site").is_file()
+
+
+def test_build_site_can_rebuild_into_its_own_sentinelled_dir(tmp_path):
+    """A dir this tool already built into is safe to build into again.
+
+    Rebuilding is the normal, expected case (a dev running the CLI twice
+    locally, or CI reusing a workspace between steps of the same job) and
+    must not be blocked by the same guard that refuses a foreign directory.
+    """
+    data = ready_dataset(tmp_path)
+    out = tmp_path / "_site"
+    build_site(data, out)
+    build_site(data, out)  # must not raise
+    assert (out / "index.html").is_file()
+    assert (out / ".ghost-bus-site").is_file()
+
+
+def test_build_site_refuses_a_foreign_non_empty_output_dir(tmp_path):
+    """Refuses to build into a directory it did not create, and - the
+    assertion that matters - does not touch what is already there.
+
+    This is what stops a careless or mistaken --out (including, worst case,
+    one that happens to point at the published dataset itself) from silently
+    destroying someone else's files: the tool can only tell "safe to
+    overwrite" from "not ours" by the sentinel, so anything non-empty without
+    one is left completely alone.
+    """
+    data = ready_dataset(tmp_path)
+    out = tmp_path / "_site"
+    out.mkdir()
+    (out / "index.html").write_text("<p>someone else's site</p>", encoding="utf-8")
+    (out / "notes.txt").write_text("do not touch", encoding="utf-8")
+    with pytest.raises(OutputDirError):
+        build_site(data, out)
+    assert (out / "index.html").read_text(encoding="utf-8") == "<p>someone else's site</p>"
+    assert (out / "notes.txt").read_text(encoding="utf-8") == "do not touch"
+    assert sorted(p.name for p in out.iterdir()) == ["index.html", "notes.txt"]
 
 
 def test_pre_baseline_build_emits_no_route_pages(tmp_path):

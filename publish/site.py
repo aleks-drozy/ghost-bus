@@ -264,3 +264,175 @@ def leaderboard(rows: list[dict], window: int = WINDOW_DAYS,
                                -e["vanished_interval"][0], e["route_id"]))
     unranked.sort(key=lambda e: (-e["trials"], e["route_id"]))
     return ranked, unranked
+
+
+UPTIME_STRIP_DAYS = 30
+
+
+def _strip_end(manifest: dict, uptime_rows: list[dict]) -> str:
+    """The right-hand edge of the uptime strip: last published day, else today."""
+    last = (manifest.get("coverage") or {}).get("last_day")
+    if last:
+        return last
+    if uptime_rows:
+        return max(row["service_date"] for row in uptime_rows)
+    return dt.datetime.now(dt.timezone.utc).date().isoformat()
+
+
+def render_uptime_strip(uptime_rows: list[dict], last_day: str,
+                        days: int = UPTIME_STRIP_DAYS) -> str:
+    """One cell per calendar day. A day we published nothing for is a visible
+    gap labelled "no data" - it is never interpolated from its neighbours."""
+    by_date = {row["service_date"]: row for row in uptime_rows}
+    end = dt.date.fromisoformat(last_day)
+    cells = []
+    for offset in range(days - 1, -1, -1):
+        day = (end - dt.timedelta(days=offset)).isoformat()
+        row = by_date.get(day)
+        fraction = None if row is None else row["uptime_fraction"]
+        if fraction is None:
+            label = f"{day}: no data"
+            cls = "gap"
+        else:
+            label = f"{day}: {fraction * 100:.1f}% tracker uptime"
+            cls = "ok" if fraction >= 0.99 else ("degraded" if fraction >= 0.90 else "down")
+        cells.append(
+            f'<li class="day {cls}" title="{esc(label)}">'
+            f'<span class="sr-only">{esc(label)}</span></li>'
+        )
+    return '<ul class="uptime-strip">' + "".join(cells) + "</ul>"
+
+
+def _route_cell(entry: dict, slugs: dict[str, str], root: str = "") -> str:
+    href = f"{root}route/{slugs[entry['route_id']]}.html"
+    long_name = entry.get("route_long_name") or ""
+    tail = f' <span class="long">{esc(long_name)}</span>' if long_name else ""
+    return f'<a href="{esc(href)}"><strong>{esc(route_label(entry))}</strong></a>{tail}'
+
+
+def _trips_cell(entry: dict) -> str:
+    title = f"{entry['scheduled']} scheduled, {entry['excluded']} excluded"
+    return f'<td class="num" title="{esc(title)}">{esc(entry["trials"])}</td>'
+
+
+def _ranked_row(position: int, entry: dict, slugs: dict[str, str]) -> str:
+    vanished = entry["vanished_interval"]
+    untracked = entry["untracked_interval"]
+    return (
+        "<tr>"
+        f'<td class="pos">{esc(position)}</td>'
+        f'<td class="route">{_route_cell(entry, slugs)}</td>'
+        f"{_trips_cell(entry)}"
+        f'<td class="num">{fmt_rate(vanished)}</td>'
+        f'<td class="num interval">{fmt_interval(vanished)}</td>'
+        f'<td class="num">{fmt_rate(untracked)}</td>'
+        f'<td class="num interval">{fmt_interval(untracked)}</td>'
+        "</tr>"
+    )
+
+
+def _unranked_row(entry: dict, slugs: dict[str, str]) -> str:
+    """Counts only. No rate is claimed for a route below the gate."""
+    return (
+        "<tr>"
+        f'<td class="route">{_route_cell(entry, slugs)}</td>'
+        f"{_trips_cell(entry)}"
+        f'<td class="num">{esc(entry["vanished"])}</td>'
+        f'<td class="num">{esc(entry["untracked"])}</td>'
+        "</tr>"
+    )
+
+
+def render_board(ranked: list[dict], unranked: list[dict],
+                 slugs: dict[str, str]) -> str:
+    parts: list[str] = []
+    if ranked:
+        parts.append("<h2>Ranked routes</h2>")
+        parts.append(
+            '<p class="note">Ordered by the <strong>lower bound</strong> of the vanished '
+            "rate, worst first, so a route sits above another only where the evidence "
+            "supports it. Untracked is shown separately and has no effect on position. "
+            "The two rates are never added together — "
+            '<a href="methodology.html">here is why</a>.</p>'
+        )
+        parts.append(
+            '<table class="board"><thead><tr>'
+            '<th>#</th><th>Route</th><th class="num">Trips judged</th>'
+            '<th class="num">Vanished</th><th class="num">95% interval</th>'
+            '<th class="num">Untracked</th><th class="num">95% interval</th>'
+            "</tr></thead><tbody>"
+        )
+        for position, entry in enumerate(ranked, start=1):
+            parts.append(_ranked_row(position, entry, slugs))
+        parts.append("</tbody></table>")
+    if unranked:
+        parts.append("<h2>Not enough data yet</h2>")
+        parts.append(
+            '<p class="note">Fewer than 30 trips we could judge in the window — '
+            "scheduled trips minus the ones we were not watching. Counts are shown so "
+            "you can see exactly what we have; these routes are not ranked and no rate "
+            "is claimed for them.</p>"
+        )
+        parts.append(
+            '<table class="board unranked"><thead><tr>'
+            '<th>Route</th><th class="num">Trips judged</th>'
+            '<th class="num">Vanished</th><th class="num">Untracked</th>'
+            "</tr></thead><tbody>"
+        )
+        for entry in unranked:
+            parts.append(_unranked_row(entry, slugs))
+        parts.append("</tbody></table>")
+    return "\n".join(parts)
+
+
+def render_index(site_dir, manifest: dict, daily_rows: list[dict],
+                 uptime_rows: list[dict], ranked: list[dict],
+                 unranked: list[dict], slugs: dict[str, str]) -> str:
+    ready = bool(manifest.get("scoreboard_ready"))
+    coverage = manifest.get("coverage") or {}
+    required = manifest.get("baseline_required_days", 14)
+    complete = coverage.get("complete_days", 0)
+
+    if ready:
+        dates = window_dates(daily_rows)
+        # The window is at most WINDOW_DAYS, but the board turns on at 14
+        # complete days. Printing the constant would claim twice the data we
+        # have for the first fortnight.
+        count = len(dates)
+        span = f"{dates[0]} to {dates[-1]}" if dates else "no complete days yet"
+        plural = "" if count == 1 else "s"
+        window_line = f"Rolling {count} complete service day{plural}, {span}."
+        baseline_notice = ""
+        board = render_board(ranked, unranked, slugs)
+    else:
+        window_line = "No route numbers are published yet."
+        baseline_notice = (
+            '<section class="baseline">'
+            f"<h2>Collecting baseline — day {esc(complete)} of {esc(required)}</h2>"
+            "<p>We publish nothing about any route until we have at least "
+            f"{esc(required)} complete days of tracking. Ranking routes on a few days of "
+            "data would be an accusation the data cannot support, so the table stays "
+            "empty until the baseline exists. Our own uptime is published from day one: "
+            "it is our reliability, not anyone else's, and you should be able to check "
+            "how much we were actually watching.</p>"
+            '<p class="note"><a href="methodology.html">Read the methodology in the '
+            "meantime</a> — it is complete, and it will not change quietly once "
+            "numbers appear.</p>"
+            "</section>"
+        )
+        board = ""
+
+    content = load_template("index.html.tmpl", site_dir).substitute(
+        window_line=esc(window_line),
+        baseline_notice=baseline_notice,
+        board=board,
+        uptime_strip=render_uptime_strip(uptime_rows, _strip_end(manifest, uptime_rows)),
+    )
+    return render_page(
+        site_dir,
+        title="Scoreboard",
+        root="",
+        current="index.html",
+        generated_at=manifest.get("generated_at", ""),
+        content=content,
+    )

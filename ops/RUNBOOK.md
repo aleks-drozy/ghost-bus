@@ -628,3 +628,314 @@ service needs to be stopped for this to run. That said, treat `--apply` as
 you would any bulk write: run the dry-run first, and prefer running it when
 you can watch `journalctl -u ghostbus-poller.service` afterward to confirm
 nothing regressed.
+
+---
+
+## 8. Publishing (dataset -> GitHub Pages)
+
+Publishing is split in two on purpose. The **VM** produces the dataset and
+pushes it to a *separate* repository, `aleks-drozy/ghost-bus-data`, which holds
+nothing but CSVs and a manifest. **CI** checks that repository out beside the
+code, renders the site from those CSVs, and deploys it.
+
+The separation is what makes the trust boundary real. A token with write
+access to the *code* repository could rewrite `publish/site.py` or a template —
+and CI checks the code repository out and executes it, so that is arbitrary
+HTML on the public site and arbitrary code in the CI runner. Scoped to a
+repository containing only data, the same permission **cannot reach**
+`publish/site.py`, any template, or any test. The worst a compromised VM can
+do is corrupt numbers, which are public, diffable, and recomputable.
+
+### 8.1 One-time GitHub setup (owner only)
+
+Three steps that cannot be scripted from the VM:
+
+1. **Create the data repository.** A new **public** repo `aleks-drozy/ghost-bus-data`
+   with a `main` branch and nothing in it but a README. Public is required,
+   not just preferred: the publish workflow's `actions/checkout` step for
+   this repo runs with the default `github.token`, scoped to `ghost-bus`
+   alone, and cannot read a *private* `ghost-bus-data` without introducing a
+   second credential — exactly what this split exists to avoid needing. It is
+   also correct on the merits: it is the open dataset. The publisher writes
+   `data/manifest.json`, `data/daily/`, `data/uptime/` into it. Nothing
+   executable ever belongs there.
+2. **Enable Pages from Actions** on the *code* repo:
+   **Settings -> Pages -> Build and deployment -> Source: GitHub Actions**.
+   Until this is set, every publish run fails at `actions/configure-pages`
+   with `Get Pages site failed`.
+3. **Mint the publish token.** A **fine-grained personal access token**, not a
+   classic one:
+   **Settings -> Developer settings -> Personal access tokens ->
+   Fine-grained tokens -> Generate new token**
+   - Resource owner: `aleks-drozy`
+   - Repository access: **Only select repositories** -> `ghost-bus-data`.
+     **Never `ghost-bus`.** This is the whole point of the split; a token
+     that can also write the code repo gives back everything the separation
+     bought — see the note on `dispatches` below for exactly why.
+   - Repository permissions: **Contents: Read and write**. Nothing else —
+     leave Actions, Workflows, Pages, Secrets and every other permission at
+     **No access**.
+   - Expiration: 90 days. Put the rotation date in the calendar; §8.5 is the
+     procedure.
+
+   Copy the `github_pat_...` value once — GitHub will not show it again.
+
+   Nothing further to configure here for triggering a rebuild. The
+   **publish** workflow (`.github/workflows/publish.yml`) already rebuilds
+   the site on a `schedule:` — `cron: '37 4 * * *'` UTC — timed to land after
+   the VM's 03:30 Europe/Dublin publish across both the GMT and IST halves of
+   the year. That is deliberate, not a stand-in for something better: the
+   alternative — a workflow living in `ghost-bus-data` that fires a
+   `repository_dispatch` at `ghost-bus` on every push, so a new dataset
+   redeploys the site immediately — was considered and rejected, because the
+   only API call that can send one (`POST /repos/{owner}/{repo}/dispatches`)
+   requires **`Contents: write` on `ghost-bus` itself**. Minting that token
+   just to get a dispatch sender would hand the VM exactly the capability
+   this whole split exists to deny it. No dispatch sender exists anywhere in
+   this project, and none should be added. §8.8 covers the one failure mode
+   a schedule-only trigger cannot self-detect.
+
+### 8.2 Install the publisher on the VM
+
+The token goes in the same file as the NTA key, with the same permissions.
+That file is the only copy of either secret on the box.
+
+```bash
+cd /opt/ghost-bus
+git pull
+
+# Clone the data repository once. The publisher writes into it and pushes it.
+git clone https://github.com/aleks-drozy/ghost-bus-data.git /opt/ghost-bus/data-repo
+
+# Append the token to the existing env file. Note the leading space: with
+# HISTCONTROL=ignorespace (bash default on Ubuntu) the line stays out of
+# ~/.bash_history. Paste the real token in place of github_pat_xxx.
+ sudo sh -c 'printf "GHOSTBUS_PUBLISH_TOKEN=%s\n" "github_pat_xxx" >> /etc/ghostbus.env'
+
+sudo chmod 600 /etc/ghostbus.env
+sudo chown root:root /etc/ghostbus.env
+
+# Confirm it landed without printing the value:
+sudo grep -c '^GHOSTBUS_PUBLISH_TOKEN=' /etc/ghostbus.env    # expect: 1
+```
+
+**The token must never be echoed into logs.** `ops/publish.sh` never names the
+variable; git receives it through `ops/git-askpass.sh`, which writes it to
+git's stdin-substitute and nowhere else, so it appears neither in `ps` output
+nor in the journal. The script also unsets `GIT_TRACE` and friends, so a
+debugging variable left in the env file cannot leak the exchange. Do not add
+`set -x` to either script, do not echo the variable while debugging, and do
+not paste the value into an issue, a commit, or a chat window. If you ever see
+it in `journalctl -u ghostbus-publisher.service`, treat the token as burned and
+go straight to §8.5.
+
+Install the units:
+
+```bash
+chmod +x /opt/ghost-bus/ops/publish.sh /opt/ghost-bus/ops/git-askpass.sh
+sudo cp /opt/ghost-bus/ops/ghostbus-publisher.service /etc/systemd/system/
+sudo cp /opt/ghost-bus/ops/ghostbus-publisher.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ghostbus-publisher.timer
+systemctl list-timers ghostbus-publisher.timer --no-pager
+```
+
+The timer fires daily at **03:30 Europe/Dublin** — late enough that the
+previous service day is closed and the classifier has finished with it, so the
+"complete service days only" rule has a whole day to publish. `Persistent=true`
+means a reboot across 03:30 runs the publish on the next boot rather than
+skipping the day.
+
+### 8.3 Verifying a publish
+
+Run it once by hand rather than waiting for the timer:
+
+```bash
+sudo systemctl start ghostbus-publisher.service
+journalctl -u ghostbus-publisher.service -n 40 --no-pager
+```
+
+A healthy run ends with one of two lines: `publish: pushed <sha>` or
+`publish: dataset unchanged, nothing to push`. Then check, in order:
+
+```bash
+# 1. The dataset on the VM.
+cat /opt/ghost-bus/data-repo/data/manifest.json
+ls -l /opt/ghost-bus/data-repo/data/uptime | tail -5
+ls -l /opt/ghost-bus/data-repo/data/daily  | tail -5     # empty before the baseline
+
+# 2. The commit that was pushed.
+cd /opt/ghost-bus/data-repo && git show --stat HEAD
+```
+
+3. On github.com, trigger the **publish** workflow directly rather than
+   waiting for its nightly cron — Actions -> publish -> **Run workflow** uses
+   the `workflow_dispatch:` trigger already in `.github/workflows/publish.yml`
+   for exactly this. The run should go green. It runs the full test suite
+   *before* it builds, so a red run means either a genuine test failure or
+   that the site builder raised on real data — in both cases the previous
+   site stays live and nothing is deployed.
+4. **A build refusal is not a flake.** `publish/site.py` prints
+   `::error::REFUSING TO BUILD: <reason>` and exits 1 on `DatasetError`,
+   `OutputDirError`, or `InjectionError` — three checks against the
+   *published dataset*, not against this codebase, so a red run here can mean
+   `ghost-bus-data`, not the code, is at fault. `DatasetError` and
+   `OutputDirError` mean the published CSVs or manifest don't match the
+   contract the builder expects — go look at what was actually pushed to
+   `ghost-bus-data`. **`InjectionError` means the builder caught markup in
+   the published dataset that would otherwise have gone live as HTML on the
+   public site — treat that one as a security event, not a broken build**,
+   and find out how it got into `ghost-bus-data` before re-running anything.
+5. Load `https://aleks-drozy.github.io/ghost-bus/` and confirm the uptime
+   strip's latest date matches `coverage.last_day` in the manifest.
+
+### 8.4 When the publish gate fails
+
+This is the **dataset gate on the VM** (`publish/dataset.py` and
+`run_checks.py`, run before anything is pushed) — a different check from the
+CI-side build refusal in §8.3.4, which runs later, on already-published CSVs,
+while rendering them. Either can fail independently of the other.
+
+**Nothing was published, and that is the system working.** `publish.sh` runs
+`publish/dataset.py` first; a failed gate exits nonzero, `set -e` stops the
+script before any git command, and the run never reaches a commit. The
+**previously published data stays up** — stale but verified — rather than being
+replaced by numbers that failed their own checks.
+
+You will see it as a failed unit:
+
+```bash
+systemctl --failed
+journalctl -u ghostbus-publisher.service -n 60 --no-pager
+```
+
+Investigate before doing anything else:
+
+```bash
+cd /opt/ghost-bus
+.venv/bin/python run_checks.py                       # which check failed, and why
+.venv/bin/python -m publish.dataset --db state/ghostbus.db --data-dir /tmp/ghostbus-dryrun
+```
+
+`outcomes_valid` runs first as a gate, so if it fails, fix that before reading
+anything into conservation or bounded-rates output. A conservation failure
+means trips are being lost or double-counted between the timetable and the
+outcomes table; a bounded-rates failure means a rate fell outside `[0, 1]`, or
+a point estimate sat outside its own interval, which is a computation bug and
+not a data quirk.
+
+**Do not force a publish past a failed gate.** There is no flag for it and none
+should be added: the whole value of the project is that a published number is
+one the data supports. Fix the cause, re-run `.venv/bin/python run_checks.py`
+until it is clean, then `sudo systemctl start ghostbus-publisher.service`.
+
+The one *non*-failure that looks like one: a run that exits 0 saying
+`dataset unchanged, nothing to push`. That is normal before the 14-day
+baseline, when only the manifest and uptime CSVs exist and neither has moved.
+It is **not** normal on a day when uptime should have changed — if you see it
+repeatedly, check that `data/` is not being ignored by git in the data
+repository.
+
+### 8.5 Rotating the publish token
+
+Rotate on expiry, on any suspicion of exposure, and whenever someone who has
+had shell on the box no longer should.
+
+1. Mint the replacement first, per §8.1 step 3 (same scope: `ghost-bus-data`
+   only, **Contents: Read and write**, nothing else).
+2. Replace the line in place, without printing it:
+
+   ```bash
+   sudo sed -i '/^GHOSTBUS_PUBLISH_TOKEN=/d' /etc/ghostbus.env
+    sudo sh -c 'printf "GHOSTBUS_PUBLISH_TOKEN=%s\n" "github_pat_new" >> /etc/ghostbus.env'
+   sudo chmod 600 /etc/ghostbus.env
+   sudo grep -c '^GHOSTBUS_PUBLISH_TOKEN=' /etc/ghostbus.env    # expect: 1
+   ```
+
+3. `systemd` reads `EnvironmentFile` at each start of the oneshot unit, so no
+   restart of a long-running process is needed — but reload and prove it works
+   before you trust it:
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl start ghostbus-publisher.service
+   journalctl -u ghostbus-publisher.service -n 20 --no-pager
+   ```
+
+4. **Revoke the old token on github.com** (Settings -> Developer settings ->
+   Fine-grained tokens -> the old token -> Delete). Rotation is not finished
+   until the old one is dead — a token that still works is still a key.
+5. If the rotation was triggered by suspected exposure, check the data repo's
+   history for anything the old token pushed that is not a CSV or the manifest:
+   `cd /opt/ghost-bus/data-repo && git log --name-only --since="30 days ago"`.
+   The site builder refuses to publish an unexpected file, so such a push would
+   have turned CI red rather than reaching the site — but it should still be
+   found and removed.
+
+### 8.6 Is the site in pre-baseline mode?
+
+Pre-baseline mode is not a setting — it is a computed consequence of how many
+complete service days exist. Read it from the manifest, which is the same
+input the site builder uses:
+
+```bash
+python3 -c "import json;m=json.load(open('/opt/ghost-bus/data-repo/data/manifest.json'));print(m['scoreboard_ready'], m['coverage']['complete_days'], m['baseline_required_days'])"
+```
+
+- `False 9 14` -> pre-baseline. `data/daily/` is empty by design, the site
+  renders methodology, the uptime strip, and "collecting baseline — day 9 of
+  14". No route table, no route pages. **This is correct behaviour, not an
+  outage.** Uptime is deliberately exempt from the gate and publishes from day
+  one: it is our own downtime, not a claim about any operator.
+- `True 14 14` -> the scoreboard is live. `data/daily/` has one CSV per
+  complete service day and `index.html` carries the ranked table.
+
+The gate is a state, not an event: if coverage ever falls back below 14 days,
+the publisher **withdraws** the route CSVs and the site returns to pre-baseline
+mode. That is intended. A site saying "we publish nothing about any route" must
+not be linking route data.
+
+From the outside, without shell access: fetch
+`https://aleks-drozy.github.io/ghost-bus/data/manifest.json`, or just look at
+the front page — pre-baseline mode says so in plain English on the page.
+
+### 8.7 Publishing from a fresh checkout after a VM rebuild
+
+The VM's `data-repo` is a working copy of what is already public, so a rebuilt
+box does not need any of it restored: `git clone` brings the published dataset
+back, and the next publish adds to it. The only things that must be recreated
+by hand are the clone (§8.2) and `/etc/ghostbus.env` (§2.1 for the NTA key,
+§8.2 for the publish token).
+
+### 8.8 Detecting a silently stalled scheduled rebuild
+
+The nightly rebuild (§8.1) depends on GitHub continuing to fire the
+`schedule:` trigger, and that is not guaranteed forever: GitHub **auto-disables
+scheduled workflows in a public repository after 60 days with no repository
+activity** — and `ghost-bus`'s own day-to-day activity happens in
+`ghost-bus-data`, not here, precisely because that is the point of the split.
+A `ghost-bus` codebase that goes two quiet months without a commit (entirely
+plausible once it settles) can have its schedule silently disabled with no
+error and no failed run to alert on. A run that never fires cannot fail, so
+nothing here notices on its own.
+
+Check for this directly first: on github.com, **Actions -> publish**. A
+disabled scheduled workflow shows a banner with a re-enable control on that
+page (or run `gh workflow enable publish.yml` from the CLI). Re-enabling only
+resumes the schedule going forward — it does not itself trigger the runs that
+were missed — so follow it with a manual **Run workflow** (§8.3) to catch the
+site up immediately.
+
+Absent that, watch it from the output side instead:
+
+- **`generated_at`**, on the published about-data page
+  (`https://aleks-drozy.github.io/ghost-bus/about-data.html`) or directly in
+  `data/manifest.json`, should never be more than about a day old. A value
+  that keeps falling further behind `date -u` means the rebuild has stopped —
+  even while `ghostbus-publisher.service` keeps publishing a fresh dataset to
+  `ghost-bus-data` every night without complaint.
+- An **external staleness check**, outside GitHub entirely, closes the loop
+  without depending on a human remembering to look — the VM already has a
+  `healthchecks.io` account wired up for the poller (§3.3); a second, longer-
+  period check that fetches the manifest and pings only when `generated_at`
+  is fresh is the natural place to add this.

@@ -127,6 +127,10 @@ def load_gtfs(zip_path: str | Path, db: sqlite3.Connection) -> str:
                            ((r["service_id"], r["date"], int(r["exception_type"]))
                             for r in rows("calendar_dates.txt")))
     db.execute("INSERT OR REPLACE INTO gtfs_meta VALUES ('gtfs_hash', ?)", (digest,))
+    # The about-data page has to state when the timetable was loaded, not just
+    # which one it is. Second precision: this is provenance, not telemetry.
+    db.execute("INSERT OR REPLACE INTO gtfs_meta VALUES ('gtfs_loaded_at', ?)",
+               (dt.datetime.now(UTC).replace(microsecond=0).isoformat(),))
     db.commit()
     return digest
 

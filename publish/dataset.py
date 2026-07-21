@@ -14,6 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from aggregate.rollup import route_day_rollup
+from run_checks import check_conservation, check_outcomes_valid, check_rates_bounded
 
 SCHEMA_VERSION = 1
 BASELINE_REQUIRED_DAYS = 14
@@ -210,3 +211,54 @@ def write_daily_csvs(db: sqlite3.Connection, data_dir, days,
         _write_csv(path, DAILY_COLUMNS, by_date.get(day, []))
         written.append(path)
     return written
+
+
+def run_gate(db: sqlite3.Connection) -> dict[str, bool]:
+    """The publish gate, in the same order run_checks.main uses.
+
+    outcomes_valid runs first and short-circuits: conservation and
+    rates_bounded key into per-outcome dict slots, so an unrecognized outcome
+    string would KeyError there instead of failing cleanly. The two are
+    reported as False in that case, which never reaches the manifest - a failed
+    gate writes nothing at all (see write_dataset).
+    """
+    if not check_outcomes_valid(db)["passed"]:
+        return {"conservation": False, "rates_bounded": False,
+                "outcomes_valid": False}
+    return {"conservation": check_conservation(db)["passed"],
+            "rates_bounded": check_rates_bounded(db)["passed"],
+            "outcomes_valid": True}
+
+
+def _count(db: sqlite3.Connection, sql: str) -> int:
+    try:
+        (n,) = db.execute(sql).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return 0
+        raise
+    return n
+
+
+def _meta(db: sqlite3.Connection, key: str) -> str:
+    try:
+        row = db.execute("SELECT value FROM gtfs_meta WHERE key=?", (key,)).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return ""
+        raise
+    return row[0] if row and row[0] else ""
+
+
+def timetable_hash(db: sqlite3.Connection) -> str:
+    return _meta(db, "gtfs_hash")
+
+
+def timetable_loaded_at(db: sqlite3.Connection) -> str:
+    """When the current timetable was loaded, or "" if we never recorded it.
+
+    Databases loaded before load_gtfs started writing this key report "", which
+    the about-data page renders as an em dash. An absent fact is shown as
+    unknown; it is never back-filled with a guess.
+    """
+    return _meta(db, "gtfs_loaded_at")

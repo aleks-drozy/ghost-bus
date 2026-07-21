@@ -190,6 +190,14 @@ def daily_rows_by_date(db: sqlite3.Connection, names: dict) -> dict[str, list[di
 
 
 def daily_rows(db: sqlite3.Connection, service_date: str, names: dict) -> list[dict]:
+    """One day's publishable rows. Convenience for a SINGLE day - tests, or a
+    one-off inspection.
+
+    NEVER call this in a loop over days. Despite the per-day signature it runs a
+    full route_day_rollup every time, so looping is quadratic in published
+    history and is exactly the nightly-run failure write_daily_csvs exists to
+    avoid. For more than one day, call daily_rows_by_date once and index it.
+    """
     return daily_rows_by_date(db, names).get(service_date, [])
 
 

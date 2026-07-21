@@ -86,6 +86,17 @@ Replace `<your key>` with the literal key from step 1, task 1. This file is
 never committed, never logged, and is the only copy of the secret outside
 the NTA developer portal itself.
 
+Before installing any credential into this file (including `GHOSTBUS_PUBLISH_TOKEN`
+in Task 19's publisher setup), verify the box has no global git credential
+cache that could bypass `GIT_ASKPASS` and write a secret to disk in plain text:
+
+```bash
+git config --global --get credential.helper   # expect: no output
+```
+
+If it prints anything (e.g. `store` or `cache`), unset it before proceeding —
+`sudo -u ubuntu git config --global --unset credential.helper`.
+
 ### 2.2 Install the systemd units
 
 `ghostbus-poller.service` and `ghostbus-classifier.service` `ExecStart` into

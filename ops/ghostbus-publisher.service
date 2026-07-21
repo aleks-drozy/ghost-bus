@@ -1,0 +1,13 @@
+[Unit]
+Description=Ghost Bus dataset publish (build CSVs, push to the data repo)
+# Ordering only, not a dependency: if both are queued in the same boot the
+# classifier finishes first, so the day being published is fully classified.
+After=ghostbus-classifier.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ghost-bus
+EnvironmentFile=/etc/ghostbus.env
+ExecStart=/opt/ghost-bus/ops/publish.sh

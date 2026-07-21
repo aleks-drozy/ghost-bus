@@ -1,0 +1,12 @@
+[Unit]
+Description=Publish the Ghost Bus dataset daily
+
+[Timer]
+# 03:30 local: late enough that the previous service day is definitively
+# closed and the classifier has had several passes at it, so the
+# complete-service-days-only rule has a whole day to publish.
+OnCalendar=*-*-* 03:30 Europe/Dublin
+Persistent=true
+
+[Install]
+WantedBy=timers.target

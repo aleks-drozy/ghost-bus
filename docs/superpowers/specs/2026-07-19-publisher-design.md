@@ -89,9 +89,14 @@ test that renders a route named `<script>alert(1)</script>`.
 
 ### D6 — Two publication gates, enforced in code
 
-- **≥30 scheduled trips** in the window before a route is ranked (the original
-  spec's anti-small-sample-shaming rule). Below-threshold routes still appear,
-  under "not enough data yet", with their counts visible.
+- **≥30 judgeable trips** — `scheduled - excluded` — in the window before a
+  route is ranked (the original spec's anti-small-sample-shaming rule).
+  Below-threshold routes still appear, under "not enough data yet", with their
+  counts visible. *Amended 2026-07-19: this said "≥30 scheduled trips" when
+  first written. Gating on `scheduled` would let a route be ranked on a rate
+  computed from far fewer judgeable trips after tracker downtime — the exact
+  small-sample problem the rule exists to prevent. The gate now uses the same
+  denominator as the rates it guards.*
 - **≥14 complete service days** before *any* route-level number is published, in
   the dataset or on the site. Before that the site renders methodology, the
   tracker-uptime strip, and "collecting baseline — day N of 14".
@@ -192,9 +197,20 @@ ok_minutes, uptime_fraction`.
   "baseline_required_days": 14,
   "gate": {"conservation": true, "rates_bounded": true, "outcomes_valid": true},
   "counts": {"observations": 0, "snapshots": 0, "trips_classified": 0},
-  "unnamed_routes": []
+  "unnamed_routes": [],
+  "route_slugs": {"<route_id>": "<slug>"}
 }
 ```
+
+`route_slugs` is the published route-id → URL-slug map. **It lives in the
+manifest, not in the site output, because the site is rebuilt from scratch on an
+ephemeral CI runner every time** — a slug map kept only alongside the previous
+build would always read back empty, and a route page's public URL could move
+whenever the operator's route ids change. The manifest is checked out with the
+data, so the builder always sees the real previous map and honours it: once a
+route page has a URL, that URL is permanent. The publisher carries entries
+forward for routes that have dropped out of the current window, so a link to a
+withdrawn route keeps resolving rather than being reassigned to a different one.
 
 `unnamed_routes` lists route ids present in outcomes but absent from
 `gtfs_routes` — surfaced on the about-data page rather than silently dropped.

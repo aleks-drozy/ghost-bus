@@ -1,3 +1,4 @@
+from ghostbus_config import DEFAULT_MATCH_RADIUS_M
 from tests.site_fixtures import DEFAULT_MANIFEST, daily_row, uptime_row, write_dataset
 
 from publish.site import SITE_DIR, render_about_data, render_methodology
@@ -40,6 +41,16 @@ def test_methodology_gate_copy_matches_the_code():
     # claim a rule the builder does not enforce.
     html = render_methodology(SITE_DIR, DEFAULT_MANIFEST)
     assert "30 scheduled trips" not in html
+
+
+def test_methodology_match_radius_matches_config():
+    # The page states the geographic match radius as a number (with a caveat
+    # that it may be retuned - see ops/RUNBOOK.md). The template takes no
+    # substitutions, so nothing re-renders this automatically if ops changes
+    # GHOSTBUS_MATCH_RADIUS_M's default; this test is the tripwire that forces
+    # the prose to be revisited if that default ever moves.
+    html = render_methodology(SITE_DIR, DEFAULT_MANIFEST)
+    assert f"{int(DEFAULT_MATCH_RADIUS_M)} metres" in html
 
 
 def test_methodology_is_a_complete_page():

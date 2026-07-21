@@ -1,0 +1,57 @@
+name: publish
+on:
+  push:
+    branches: [main]
+    # Any change that can alter the emitted HTML must redeploy, or the live
+    # site keeps serving stale pages until the data happens to move.
+    paths: ['publish/**', 'site/**', 'aggregate/**', '.github/workflows/publish.yml']
+  # The dataset lives in aleks-drozy/ghost-bus-data, so a new publish arrives
+  # as a dispatch rather than as a push to this repository.
+  repository_dispatch:
+    types: [dataset-published]
+  workflow_dispatch:
+
+# Least privilege: the workflow reads the repos and writes only a Pages
+# deployment. It never writes repo contents - the VM owns the dataset.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One Pages deployment at a time; never cancel one mid-flight, because a
+# cancelled deploy can leave the site on a half-uploaded artifact.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # The published dataset, checked out alongside the code. It contains only
+      # CSVs and a manifest, so nothing here is executable.
+      - uses: actions/checkout@v5
+        with:
+          repository: aleks-drozy/ghost-bus-data
+          path: data
+      - uses: actions/setup-python@v6
+        with: {python-version: '3.12', cache: pip}
+      - run: pip install -r requirements-dev.txt
+      # Gate: the full suite must pass before anything is rendered.
+      - run: python -m pytest
+      # D3: the site is built from the published CSVs, never from the database.
+      - run: python -m publish.site --data data/data --out _site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with: {path: _site}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

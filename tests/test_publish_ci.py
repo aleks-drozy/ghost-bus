@@ -21,15 +21,20 @@ def test_workflow_file_exists():
     assert WORKFLOW.is_file(), f"missing workflow: {WORKFLOW}"
 
 
-def test_triggers_on_site_source_changes_and_on_new_data(text):
+def test_triggers_on_site_source_changes_and_on_a_daily_schedule(text):
     assert "branches: [main]" in text
     # A change to the builder or a template must redeploy: otherwise the live
     # site keeps serving stale HTML until the data happens to move.
     for path in ("'publish/**'", "'site/**'", "'.github/workflows/publish.yml'"):
         assert path in text, path
-    # The dataset lives in another repo, so it signals by dispatch.
-    assert "repository_dispatch:" in text
-    assert "types: [dataset-published]" in text
+    # repository_dispatch was considered and rejected: the only API call that
+    # could fire one at this repo ("Create a repository dispatch event")
+    # requires a Contents:write token on THIS repo by GitHub's own
+    # fine-grained-permission table - exactly the capability spec D4 denies
+    # the VM. No credential can send that dispatch without reintroducing what
+    # the trust split removed, so this polls on a schedule instead.
+    assert "repository_dispatch" not in text
+    assert "cron: '37 4 * * *'" in text
     assert "workflow_dispatch:" in text
 
 
@@ -53,6 +58,13 @@ def test_checks_out_the_dataset_repository_into_the_data_directory(text):
 
 
 def test_full_suite_runs_before_the_site_is_built(text):
+    # Positional only: text.index finds the first occurrence of each
+    # substring anywhere in the file and compares byte offsets. It has no
+    # idea which job or step either line belongs to, so it would still pass
+    # if the pytest step moved to a step in a job the build step does not
+    # depend on. A structural check - parsing the YAML and walking the real
+    # step list - would need PyYAML, which the stdlib-only rule excludes (see
+    # module docstring). This is a known, accepted gap, not a proof.
     suite = text.index("run: python -m pytest")
     build = text.index("run: python -m publish.site")
     assert suite < build, "the test suite must run before the site is built"

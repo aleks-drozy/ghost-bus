@@ -899,7 +899,20 @@ def main(argv=None) -> int:
     parser.add_argument("--out", default="_site", help="output directory")
     parser.add_argument("--site", default=str(SITE_DIR), help="template directory")
     args = parser.parse_args(argv)
-    manifest = build_site(args.data, args.out, args.site)
+    try:
+        manifest = build_site(args.data, args.out, args.site)
+    except (DatasetError, OutputDirError, InjectionError) as exc:
+        # A deliberate refusal to build, not a crash - printed to stdout
+        # (unlike publish/dataset.py's CLI, which prints its own gate
+        # failure to stderr) because GitHub Actions only recognises the
+        # ::error:: workflow command when it appears on stdout; on stderr it
+        # would be an ordinary log line, not an annotation in the Actions UI.
+        # InjectionError in particular means this build caught live markup
+        # that should not exist - the single most important signal this
+        # system can emit, so it must be unmistakable in the log rather than
+        # buried in a traceback.
+        print(f"::error::REFUSING TO BUILD: {exc}")
+        return 1
     routes = len(manifest.get("route_slugs") or {})
     ready = manifest.get("scoreboard_ready")
     print(f"built {args.out}: scoreboard_ready={ready}, {routes} route pages")

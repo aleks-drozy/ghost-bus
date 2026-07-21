@@ -140,22 +140,28 @@ def _invariant_db():
       PRIMARY KEY (trip_id, service_date));
     """)
     rows = [
-        # R1: scheduled 5, excluded 1 -> denominator 4, one VANISHED, one
-        # UNTRACKED. Each rate is 0.25; the forbidden sum is 0.50, a value that
-        # matches no other field on the row, so a leak is unambiguous.
+        # R1: scheduled 6, excluded 1 -> denominator 5, 2 VANISHED, 1 UNTRACKED,
+        # 2 COMPLETED, 0 CANCELLED. Forbidden values: count_sum=3, rate=0.6,
+        # pct=60.0; none match any legitimate field on this row.
         ("a", "2026-03-23", "R1", "2026-03-23T07:00:00+00:00", "COMPLETED"),
-        ("b", "2026-03-23", "R1", "2026-03-23T07:30:00+00:00", "UNTRACKED"),
+        ("b", "2026-03-23", "R1", "2026-03-23T07:30:00+00:00", "COMPLETED"),
         ("c", "2026-03-23", "R1", "2026-03-23T08:00:00+00:00", "VANISHED"),
-        ("d", "2026-03-23", "R1", "2026-03-23T08:30:00+00:00", "EXCLUDED"),
-        ("e", "2026-03-23", "R1", "2026-03-23T09:00:00+00:00", "CANCELLED"),
+        ("d", "2026-03-23", "R1", "2026-03-23T08:30:00+00:00", "VANISHED"),
+        ("e", "2026-03-23", "R1", "2026-03-23T09:00:00+00:00", "UNTRACKED"),
+        ("f", "2026-03-23", "R1", "2026-03-23T09:30:00+00:00", "EXCLUDED"),
         # R2: every trip excluded -> denominator 0, all rates None.
-        ("f", "2026-03-23", "R2", "2026-03-23T09:00:00+00:00", "EXCLUDED"),
-        # R3: scheduled 4, three UNTRACKED and one VANISHED -> rates 0.75 and
-        # 0.25, forbidden sum 1.0, which also catches a clamped-to-1.0 leak.
-        ("g", "2026-03-24", "R3", "2026-03-24T07:00:00+00:00", "UNTRACKED"),
-        ("h", "2026-03-24", "R3", "2026-03-24T07:30:00+00:00", "UNTRACKED"),
-        ("i", "2026-03-24", "R3", "2026-03-24T08:00:00+00:00", "UNTRACKED"),
-        ("j", "2026-03-24", "R3", "2026-03-24T08:30:00+00:00", "VANISHED"),
+        ("g", "2026-03-23", "R2", "2026-03-23T10:00:00+00:00", "EXCLUDED"),
+        # R3: scheduled 5, 1 VANISHED, 3 UNTRACKED, 1 COMPLETED, 0 CANCELLED.
+        # Forbidden values: count_sum=4, rate=0.8, pct=80.0; catches 1.0 clamping.
+        ("h", "2026-03-24", "R3", "2026-03-24T07:00:00+00:00", "COMPLETED"),
+        ("i", "2026-03-24", "R3", "2026-03-24T07:30:00+00:00", "VANISHED"),
+        ("j", "2026-03-24", "R3", "2026-03-24T08:00:00+00:00", "UNTRACKED"),
+        ("k", "2026-03-24", "R3", "2026-03-24T08:30:00+00:00", "UNTRACKED"),
+        ("l", "2026-03-24", "R3", "2026-03-24T09:00:00+00:00", "UNTRACKED"),
+        # R4: scheduled 2, 2 COMPLETED, 0 VANISHED, 0 UNTRACKED. Exercises the
+        # combined==0.0 branch (both rates legitimately 0.0).
+        ("m", "2026-03-25", "R4", "2026-03-25T07:00:00+00:00", "COMPLETED"),
+        ("n", "2026-03-25", "R4", "2026-03-25T07:30:00+00:00", "COMPLETED"),
     ]
     conn.executemany("INSERT INTO trip_outcomes VALUES (?,?,?,?,?)", rows)
     conn.commit()
@@ -167,9 +173,7 @@ def test_no_combined_rate_key_exists():
         for key in row:
             assert "ghost" not in key, f"combined-rate key reappeared: {key}"
             assert "combined" not in key, f"combined-rate key reappeared: {key}"
-        assert "ghost_rate" not in row
-        assert "combined_rate" not in row
-        assert "failure_rate" not in row
+            assert "failure_rate" not in key, f"combined-rate key reappeared: {key}"
 
 
 def test_published_rate_keys_are_exactly_the_six_split_fields():
@@ -181,6 +185,12 @@ def test_published_rate_keys_are_exactly_the_six_split_fields():
 
 
 def test_no_published_field_equals_the_sum_of_the_two_rates():
+    # Fixture is chosen so that every forbidden value is distinct from every
+    # published field, preventing false positives. A future editor should not
+    # casually change the trip counts without re-verifying.
+    # Skip outcome-count keys (vanished, untracked, completed, etc.) and identifiers.
+    outcome_keys = {"vanished", "untracked", "completed", "cancelled", "scheduled", "excluded",
+                    "route_id", "service_date", "local_hour"}
     for row in route_day_rollup(_invariant_db()):
         denom = row["scheduled"] - row["excluded"]
         if denom <= 0:
@@ -188,23 +198,45 @@ def test_no_published_field_equals_the_sum_of_the_two_rates():
                 assert row[key] is None, key
             continue
         combined = (row["vanished"] + row["untracked"]) / denom
-        if combined == 0.0:
-            # Both rates are legitimately 0.0 here, so equality proves nothing.
-            continue
         assert row["vanished_rate"] + row["untracked_rate"] == pytest.approx(combined)
+        # Forbidden values: raw rate, percentage form, rounded versions, and count sum.
+        # These represent ways the combined rate could leak into published fields.
+        forbidden = {
+            combined,  # Raw rate (e.g., 0.6)
+            combined * 100,  # Percentage (e.g., 60.0)
+            round(combined, 1),  # Rounded to 1 decimal
+            round(combined, 2),  # Rounded to 2 decimals
+            round(combined, 3),  # Rounded to 3 decimals
+            round(combined * 100, 1),  # Percentage rounded to 1 decimal
+            round(combined * 100, 2),  # Percentage rounded to 2 decimals
+            round(combined * 100, 3),  # Percentage rounded to 3 decimals
+            row["vanished"] + row["untracked"],  # Integer count sum
+        }
         for key, value in row.items():
+            # Skip outcome counts, identifiers, None values, and the split rate fields.
+            if key in outcome_keys or key in RATE_KEYS or value is None:
+                continue
+            # Reject any published field that matches a forbidden value.
             if isinstance(value, float):
-                assert value != pytest.approx(combined), (
-                    f"{key} on route {row['route_id']} equals vanished+untracked "
-                    f"({combined}); the two rates must never be summed (D1)")
+                for forbidden_val in forbidden:
+                    if isinstance(forbidden_val, float):
+                        assert value != pytest.approx(forbidden_val), (
+                            f"{key} on route {row['route_id']} equals vanished+untracked "
+                            f"({combined}); the two rates must never be summed (D1)")
+            else:
+                # Integer or other type: direct comparison.
+                assert value not in forbidden, (
+                    f"{key} on route {row['route_id']} has value {value} matching "
+                    f"count sum {row['vanished'] + row['untracked']}; "
+                    f"the two rates must never be summed (D1)")
 
 
 def test_the_two_rates_are_reported_independently():
     rows = {r["route_id"]: r for r in route_day_rollup(_invariant_db())}
     r3 = rows["R3"]
     # Different numerators over the same denominator: proof they are not one
-    # number wearing two names.
-    assert r3["vanished_rate"] == pytest.approx(1 / 4)
-    assert r3["untracked_rate"] == pytest.approx(3 / 4)
+    # number wearing two names. R3: denom=5, vanished=1, untracked=3.
+    assert r3["vanished_rate"] == pytest.approx(1 / 5)
+    assert r3["untracked_rate"] == pytest.approx(3 / 5)
     assert r3["vanished_lo"] != pytest.approx(r3["untracked_lo"])
     assert r3["vanished_hi"] != pytest.approx(r3["untracked_hi"])

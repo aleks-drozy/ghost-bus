@@ -83,3 +83,55 @@ def test_pre_baseline_mode_is_diagnosable(runbook):
     body = section(runbook, "## 8. Publishing")
     assert "scoreboard_ready" in body
     assert "complete_days" in body
+
+
+README = REPO / "README.md"
+
+
+@pytest.fixture(scope="module")
+def readme():
+    return README.read_text(encoding="utf-8")
+
+
+def test_readme_has_a_scoreboard_section(readme):
+    assert "## The scoreboard & open data" in readme
+
+
+def test_readme_links_the_site_and_the_dataset(readme):
+    body = section(readme, "## The scoreboard & open data")
+    assert "https://aleks-drozy.github.io/ghost-bus/" in body
+    assert "ghost-bus-data" in body
+    assert "daily/" in body
+    assert "uptime/" in body
+    assert "manifest.json" in body
+
+
+def test_readme_states_the_baseline_gate(readme):
+    body = section(readme, "## The scoreboard & open data")
+    assert "14 complete service days" in body
+
+
+def test_readme_states_the_two_rates_are_never_summed(readme):
+    body = section(readme, "## The scoreboard & open data")
+    assert "never summed" in body
+
+
+def test_readme_gate_copy_counts_trips_judged(readme):
+    body = section(readme, "## The scoreboard & open data")
+    assert "30 trips we could judge" in body
+    assert "30 scheduled trips" not in body
+
+
+def test_readme_publishes_no_reliability_numbers(readme):
+    """No percentages: any figure here is stale the next time data lands."""
+    body = section(readme, "## The scoreboard & open data")
+    assert not re.search(r"\d+(\.\d+)?\s*%", body), "no reliability figures in the README"
+
+
+def test_readme_tree_lists_the_new_packages(readme):
+    assert "publish/" in readme
+    assert "site/" in readme
+
+
+def test_attribution_appears_once(readme):
+    assert readme.count("National Transport Authority") == 1

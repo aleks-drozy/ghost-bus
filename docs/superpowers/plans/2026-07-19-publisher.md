@@ -756,7 +756,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: `classify/store.py` table `heartbeats(ts_utc TEXT PRIMARY KEY, ok INTEGER)`, where `ts_utc` is an aware-UTC `datetime.isoformat()` string written by `ingest/poller.py`, e.g. `2026-03-23T00:00:00.100000+00:00`.
 - Produces, relied on by Tasks 5-6 and 8-9:
-  - `SCHEMA_VERSION: int`, `BASELINE_REQUIRED_DAYS: int`, `LOCAL_TZ: str`, `UTC`, `EXPECTED_MINUTES_PER_DAY: int`
+  - `SCHEMA_VERSION: int`, `BASELINE_REQUIRED_DAYS: int`, `LOCAL_TZ: str`, `UTC`, `expected_minutes(day, tz=LOCAL_TZ) -> int`
   - `UPTIME_COLUMNS: tuple[str, ...]`
   - `_write_csv(path: pathlib.Path, columns, rows) -> None`
   - `local_today(tz: str = LOCAL_TZ) -> datetime.date`
@@ -1006,13 +1006,16 @@ BASELINE_REQUIRED_DAYS = 14
 LOCAL_TZ = "Europe/Dublin"
 UTC = dt.timezone.utc
 
-# A service day is credited with a flat 1440 expected minutes. On the two DST
-# days the local day is really 1380 or 1500 minutes long. Holding the
-# denominator fixed keeps the published series comparable; the cost is that on
-# the spring-forward day we understate our own uptime, and on the fall-back day
-# a clamped 1.000000 can mask up to 60 minutes of downtime. Both are stated on
-# the about-data page rather than silently corrected.
-EXPECTED_MINUTES_PER_DAY = 1440
+# SUPERSEDED DURING EXECUTION (2026-07-19). This task originally specified a
+# flat `EXPECTED_MINUTES_PER_DAY = 1440` and accepted, on the two DST days,
+# understating our uptime in spring and CLAMPING TO 1.000000 in autumn - which
+# masks up to 60 minutes of real downtime. That error direction is unacceptable
+# for a self-accountability metric: tracker downtime EXCLUDES trips precisely so
+# we never blame an operator for our own blindness, so a number that can conceal
+# our downtime undermines the reason it is published. Implemented instead as a
+# per-day `expected_minutes(day)` derived from `day_bounds_utc`'s real span
+# (1380 / 1440 / 1500), which the CSV schema already accommodated via its
+# `expected_minutes` column. See commit d49f4d4.
 
 UPTIME_COLUMNS = ("service_date", "expected_minutes", "ok_minutes", "uptime_fraction")
 
@@ -1066,9 +1069,10 @@ def uptime_row(db: sqlite3.Connection, day: dt.date) -> dict:
         "SELECT COUNT(DISTINCT substr(ts_utc,1,16)) FROM heartbeats "
         "WHERE ok=1 AND ts_utc>=? AND ts_utc<?",
         (start.isoformat(), end.isoformat())).fetchone()
-    fraction = min(1.0, ok_minutes / EXPECTED_MINUTES_PER_DAY)
+    expected = expected_minutes(day)  # per-day; see the superseded note above
+    fraction = min(1.0, ok_minutes / expected)
     return {"service_date": day.isoformat(),
-            "expected_minutes": EXPECTED_MINUTES_PER_DAY,
+            "expected_minutes": expected,
             "ok_minutes": ok_minutes,
             "uptime_fraction": f"{fraction:.6f}"}
 

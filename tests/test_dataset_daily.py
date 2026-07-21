@@ -96,6 +96,29 @@ def test_route_names_survive_a_database_with_no_gtfs_tables():
     assert unnamed_routes(db, {}) == ["R9"]
 
 
+def test_write_daily_csvs_prunes_a_csv_whose_day_dropped_out_of_coverage(tmp_path):
+    """C1: reproduces the orphan bug directly at the write_daily_csvs level.
+
+    Publish 20 days, then republish with only the first 15 still in `days`
+    (as happens when rows for the later days are deleted from
+    trip_outcomes, e.g. RUNBOOK 8.4's recovery from a failed gate). The five
+    orphaned CSVs must be removed, not left on disk to be read back by
+    publish/site.py's directory scan and enter a window the manifest no
+    longer claims.
+    """
+    db = build_db(service_dates=consecutive_dates(20))
+    names = route_names(db)
+    all_days = consecutive_dates(20)
+    write_daily_csvs(db, tmp_path, all_days, names)
+    assert sorted(p.name for p in (tmp_path / "daily").iterdir()) == \
+        [f"{d}.csv" for d in all_days]
+
+    kept_days = all_days[:15]
+    write_daily_csvs(db, tmp_path, kept_days, names)
+    assert sorted(p.name for p in (tmp_path / "daily").iterdir()) == \
+        [f"{d}.csv" for d in kept_days]
+
+
 def test_write_daily_csvs_rolls_the_outcomes_table_up_once(tmp_path, monkeypatch):
     """One full-table rollup per run, not one per published day.
 

@@ -75,6 +75,28 @@ def test_day_by_day_table_shows_a_gap_row_for_a_missing_day():
     assert "no data published for this day" in html
 
 
+def test_gap_row_distinguishes_unscheduled_service_from_nothing_published():
+    """I1: a day the site DID publish (some other route has a row for it),
+    but THIS route had no scheduled service, must read differently from a
+    day nothing was published for at all.
+
+    Before this fix, a route with no Sunday service showed "no data
+    published for this day" on every Sunday, on the SAME site whose index
+    page uptime strip shows 100% tracker uptime for that same date - two
+    pages contradicting each other about the same calendar day. window_dates
+    already exposes exactly the distinction needed: if the day is in it,
+    something was published and this route simply wasn't running; only a day
+    absent from it altogether means nothing was published at all.
+    """
+    r1_rows = rows_for("R1", [("2026-06-26", 40, 2, 0), ("2026-06-27", 40, 2, 0),
+                              ("2026-06-28", 40, 2, 0)])
+    r2_rows = rows_for("R2", [("2026-06-26", 40, 2, 0), ("2026-06-28", 40, 2, 0)])
+    html = page_for(r1_rows + r2_rows, "R2")
+    assert "2026-06-27" in html
+    assert "no scheduled service for this route on this day" in html
+    assert "no data published for this day" not in html
+
+
 def test_gap_row_is_never_given_numbers():
     rows = rows_for("R1", [("2026-06-26", 40, 2, 0), ("2026-06-28", 40, 2, 0)])
     html = page_for(rows, "R1")
@@ -144,15 +166,25 @@ def test_window_heading_states_the_true_span_across_a_gapped_window():
     """
     rows = rows_for("R1", _gapped_days_and_counts())
     html = page_for(rows, "R1")
-    assert "Last 28 complete service days, 2026-05-01 to 2026-06-09" in html
+    assert "Rolling 28 complete service days, 2026-05-01 to 2026-06-09." in html
 
 
 def test_window_heading_states_a_single_day_without_a_bogus_span():
     rows = rows_for("R1", [("2026-06-28", 40, 2, 0)])
     html = page_for(rows, "R1")
-    assert "Last 1 complete service day, 2026-06-28" in html
+    assert "Rolling 1 complete service day, 2026-06-28." in html
     # Not "2026-06-28 to 2026-06-28" - a single day has no span to state.
     assert "2026-06-28 to 2026-06-28" not in html
+
+
+def test_window_heading_wording_matches_the_index_page():
+    """M3: the index and a route page describe the identical fact (the same
+    window_dates over the same daily_rows) and must use the same word for
+    it - 'Rolling', not 'Last' on one page and 'Rolling' on the other."""
+    rows = rows_for("R1", [("2026-06-28", 40, 2, 0)])
+    html = page_for(rows, "R1")
+    assert "Last 1 complete service day" not in html
+    assert "Rolling 1 complete service day" in html
 
 
 def test_window_heading_states_zero_days_sensibly_when_daily_rows_is_empty():

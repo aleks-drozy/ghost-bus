@@ -452,6 +452,7 @@ def _daily_table(entry: dict, daily_rows: list[dict]) -> str:
     dates = window_dates(daily_rows)
     if not dates:
         return '<p class="note">No complete service days published yet.</p>'
+    published = set(dates)
     by_date = {
         row["service_date"]: row
         for row in daily_rows
@@ -472,9 +473,22 @@ def _daily_table(entry: dict, daily_rows: list[dict]) -> str:
         iso = day.isoformat()
         row = by_date.get(iso)
         if row is None:
+            # window_dates is the set of dates SOMETHING was published for
+            # (see its own docstring). If this day is in it, the day itself
+            # was published and this route simply had no scheduled service -
+            # a Sunday or school-term gap, not an outage. Only a day absent
+            # from `published` altogether means we published nothing at all.
+            # Conflating the two used to make an unscheduled Sunday print
+            # "no data published for this day" on every route that has none,
+            # while the index's uptime strip showed 100% for that same date -
+            # two pages contradicting each other over the same day.
+            if iso in published:
+                gap_text = "no scheduled service for this route on this day"
+            else:
+                gap_text = "no data published for this day"
             parts.append(
                 f'<tr class="gap"><td>{esc(iso)}</td>'
-                '<td colspan="5">no data published for this day</td></tr>'
+                f'<td colspan="5">{esc(gap_text)}</td></tr>'
             )
         else:
             trials = row["scheduled"] - row["excluded"]
@@ -500,12 +514,19 @@ def _window_heading(dates: list[str]) -> str:
     `window_dates` returns the days actually PRESENT in the data, not a fixed
     trailing range (see its own docstring). A gapped publisher - a VM outage,
     a failed gate, a corrupted file - can make the two disagree by a lot: 28
-    judged days can stretch across 40 calendar days. "Last 28 complete
+    judged days can stretch across 40 calendar days. "Rolling 28 complete
     service days" alone reads as "roughly the last month"; a reader would be
     misled by omission if the evidence actually reached back further than
     that. The index page's window_line states both for the same reason
     (D3/D6 honesty); this mirrors that structure rather than inventing a
     second convention for the same fact.
+
+    M3: this used to say "Last N complete service days" while the index said
+    "Rolling N complete service days" for the identical fact (both are
+    `window_dates` over the same daily_rows) - two different words for one
+    thing read like two different windows to a reader moving between the
+    two pages. "Rolling" is the word used here now, matching the index
+    exactly, including its trailing period.
 
     Degenerate cases are handled explicitly rather than falling through to a
     grammatically odd sentence: zero days (defensive - the pre-baseline path
@@ -518,8 +539,8 @@ def _window_heading(dates: list[str]) -> str:
     if count == 0:
         return "No complete service days published yet"
     if count == 1:
-        return f"Last 1 complete service day, {dates[0]}"
-    return f"Last {count} complete service days, {dates[0]} to {dates[-1]}"
+        return f"Rolling 1 complete service day, {dates[0]}."
+    return f"Rolling {count} complete service days, {dates[0]} to {dates[-1]}."
 
 
 def render_route(site_dir, manifest: dict, entry: dict, daily_rows: list[dict],
@@ -661,6 +682,7 @@ class OutputDirError(RuntimeError):
 
 
 _DATA_FILE = re.compile(r"^\d{4}-\d{2}-\d{2}\.csv$")
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SENTINEL = ".ghost-bus-site"
 
 
@@ -808,6 +830,45 @@ def _copy_dataset(data_dir: Path, dest: Path) -> None:
         shutil.copyfile(path, target)
 
 
+def _assert_daily_dates_within_manifest_coverage(manifest: dict,
+                                                 daily_rows: list[dict]) -> None:
+    """manifest["coverage"] is the authoritative statement of which days
+    exist (spec D3): the published daily CSVs must never claim a day outside
+    the range it names.
+
+    Structural, not cosmetic: write_daily_csvs prunes orphaned CSVs on the
+    publisher's own next run, but this module never touches the database and
+    must not simply trust that the two artifacts it was HANDED agree - a
+    manifest and a daily/ directory reaching CI from two different pushes,
+    a hand-edited manifest, or a publisher bug regressing the prune all leave
+    exactly this shape: a daily CSV dated after coverage.last_day (or before
+    first_day). Catching it here, rather than silently rendering it, is what
+    makes it structurally impossible for the site to state a coverage the
+    manifest denies.
+
+    Only compared when both bounds are syntactically real ISO dates: a
+    manifest whose own coverage fields are not dates at all (a hostile or
+    corrupted manifest.json) is already handled elsewhere in this module by
+    crashing outright the moment something tries to parse it as one (see
+    tests/test_site_escaping.py's
+    test_hostile_coverage_last_day_crashes_the_build_rather_than_publishing)
+    - lexicographically comparing a real date string against arbitrary text
+    would be a coincidence of byte values, not a coverage check.
+    """
+    dates = {row["service_date"] for row in daily_rows}
+    if not dates:
+        return
+    coverage = manifest.get("coverage") or {}
+    first_day, last_day = coverage.get("first_day"), coverage.get("last_day")
+    if not (_ISO_DATE.match(first_day or "") and _ISO_DATE.match(last_day or "")):
+        return
+    outside = sorted(d for d in dates if d < first_day or d > last_day)
+    if outside:
+        raise DatasetError(
+            "published daily CSVs include dates outside the manifest's own "
+            f"coverage ({first_day}..{last_day}): {outside}")
+
+
 def build_site(data_dir, out_dir, site_dir=SITE_DIR) -> dict:
     """Render the whole site from the published dataset into out_dir.
 
@@ -832,6 +893,8 @@ def build_site(data_dir, out_dir, site_dir=SITE_DIR) -> dict:
     daily_rows = read_daily(data_dir)
     uptime_rows = read_uptime(data_dir)
     ready = bool(manifest.get("scoreboard_ready"))
+
+    _assert_daily_dates_within_manifest_coverage(manifest, daily_rows)
 
     if not ready and (data_dir / "daily").is_dir():
         raise DatasetError(

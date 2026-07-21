@@ -103,6 +103,32 @@ def test_falling_below_the_baseline_withdraws_published_route_csvs(tmp_path):
     assert read_manifest(tmp_path)["scoreboard_ready"] is False
 
 
+def test_orphaned_daily_csvs_are_pruned_when_coverage_drops_partially(tmp_path):
+    """C1 reproduction: coverage drops from 20 days to 15 - above the 14-day
+    baseline, so the withdrawal rule (write_dataset's `elif daily_dir.is_dir():
+    shutil.rmtree(daily_dir)`) never fires at all. Before the fix, the five
+    now-unpublished days' CSVs were simply never touched: they stayed on disk,
+    publish/site.py's directory scan read them back, and the site claimed a
+    coverage (2026-03-02 to 2026-03-21) the manifest it was built from denied
+    (2026-03-02 to 2026-03-16, 15 days).
+    """
+    days20 = consecutive_dates(20)                       # 2026-03-02..2026-03-21
+    write_dataset(build_db(service_dates=days20), tmp_path,
+                  today=dt.date(2026, 3, 22), now_utc=FIXED_NOW)
+    assert sorted(p.name for p in (tmp_path / "daily").iterdir()) == \
+        [f"{d}.csv" for d in days20]
+
+    days15 = days20[:15]                                  # 2026-03-02..2026-03-16
+    write_dataset(build_db(service_dates=days15), tmp_path,
+                  today=dt.date(2026, 3, 17), now_utc=FIXED_NOW)
+    manifest = read_manifest(tmp_path)
+    assert manifest["coverage"] == {"first_day": days15[0], "last_day": days15[-1],
+                                    "complete_days": 15}
+    assert manifest["scoreboard_ready"] is True
+    assert sorted(p.name for p in (tmp_path / "daily").iterdir()) == \
+        [f"{d}.csv" for d in days15]
+
+
 def test_uptime_is_exempt_from_the_baseline_gate(tmp_path):
     # Day one: no route data may ship, but our own downtime always does.
     db = build_db()

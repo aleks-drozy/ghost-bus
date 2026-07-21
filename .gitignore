@@ -3,6 +3,6 @@ __pycache__/
 .venv/
 .pytest_cache/
 .superpowers/
-data/probe/
+data/
 state/
 data-repo/

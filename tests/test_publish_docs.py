@@ -73,6 +73,34 @@ def test_gate_failure_procedure_says_publish_nothing(runbook):
     assert "Do not force a publish" in body
 
 
+def test_upgrade_section_exists_before_the_one_time_setup_section(runbook):
+    """I4: an operator following section 8 end to end on an existing install
+    must land with poller, classifier, AND publisher all owned by `ubuntu`,
+    not a publisher on `ubuntu` next to a root poller/classifier still
+    recreating root-owned state/* files. Section 8.0 must precede 8.1 in the
+    file (not merely exist) so it's actually read first end to end."""
+    body = section(runbook, "## 8. Publishing")
+    assert "### 8.0" in body
+    assert body.index("### 8.0") < body.index("### 8.1")
+
+
+def test_upgrade_section_covers_the_full_sequence(runbook):
+    body = section(runbook, "### 8.0")
+    body = body[: body.index("### 8.1")] if "### 8.1" in body else body
+    assert "git pull" in body
+    for unit in ("ghostbus-poller.service", "ghostbus-classifier.service",
+                "ghostbus-classifier.timer", "ghostbus-publisher.service",
+                "ghostbus-publisher.timer"):
+        assert unit in body, unit
+    assert "daemon-reload" in body
+    assert "stop ghostbus-poller.service ghostbus-classifier.service" in body
+    assert "chown -R ubuntu:ubuntu /opt/ghost-bus" in body
+    # Whole tree, not just state/ - the exact gap this section exists to close.
+    assert "chown -R ubuntu:ubuntu /opt/ghost-bus/state" not in body
+    assert "systemctl show -p User ghostbus-poller.service" in body
+    assert "ls -l /opt/ghost-bus/state" in body
+
+
 def test_rotation_procedure_is_documented(runbook):
     body = section(runbook, "## 8. Publishing")
     assert "### 8.5 Rotating the publish token" in body
@@ -120,6 +148,33 @@ def test_readme_gate_copy_counts_trips_judged(readme):
     body = section(readme, "## The scoreboard & open data")
     assert "30 trips we could judge" in body
     assert "30 scheduled trips" not in body
+
+
+def test_readme_taxonomy_states_the_max_over_all_reports_not_just_the_last(readme):
+    """I2: classify/outcomes.py:80 uses max(seqs) over every report in the
+    window (feed stop_sequence merged with the geographic match), not the
+    last observation alone - and line 68 of this same file already says so
+    ('the two evidence sources merge by taking the maximum'). The taxonomy
+    table must not contradict its own file."""
+    assert "last observation shows stop-sequence progress" not in readme
+    assert "highest stop-sequence progress reached across" in readme
+
+
+def test_readme_taxonomy_states_the_completion_window_is_one_sided(readme):
+    """classify/outcomes.py:81 is `last_ts >= trip.end_utc - timedelta(minutes=10)`
+    - one-sided, satisfied by anything from 10 minutes before the scheduled
+    end onward, including after it. 'within 10 min of the scheduled
+    final-stop time' reads as a two-sided window around that instant."""
+    assert "one-sided" in readme
+
+
+def test_readme_untracked_row_says_position_observations_not_any_observations(readme):
+    """I2: a trip with TripUpdate rows and no vehicle position ping is
+    UNTRACKED - that is the entire point of the class (a prediction alone is
+    not proof a vehicle exists). 'zero observations' without qualification
+    reads as zero rows of any kind, which is not what the classifier checks."""
+    assert "zero vehicle *position* observations" in readme
+    assert "zero observations in the whole window" not in readme
 
 
 def test_readme_publishes_no_reliability_numbers(readme):

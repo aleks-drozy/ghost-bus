@@ -364,9 +364,17 @@ This sequence starts coordinate capture soonest:
    the condition to stderr and skips the poll instead of crashing, and
    `systemd` never sees a process death, so there is no restart storm to
    compound the outage. Each skipped poll shows up as a missing heartbeat,
-   which is honest tracker downtime: any trip observations lost in that
-   window are EXCLUDED from operator statistics rather than counted against
-   the operator, because the gap is the tracker's fault, not theirs. The
+   which is honest tracker downtime: it counts toward the same 90%-uptime
+   threshold `classify/outcomes.py` (documented on the methodology page)
+   uses to decide EXCLUDED, for every trip window it falls inside. If enough
+   of this outage lands inside a trip's own window to push that trip's
+   uptime below 90%, the trip is EXCLUDED from operator statistics rather
+   than counted against the operator. But the threshold cuts both ways: a
+   refresh short enough, or timed such that no single trip window loses more
+   than 10% of its own coverage to it, leaves every affected trip judged
+   normally — and if the timing happens to land where a genuinely-completed
+   trip would have shown its late progress, this gap is our fault, not the
+   operator's, but it can still read as VANISHED on the public site. The
    poller resumes on its own the moment the refresh transaction commits and
    the lock releases — no operator action needed. (Stopping the poller for
    the refresh and restarting it afterwards would also be honest, but adds a
@@ -637,6 +645,86 @@ Publishing is split in two on purpose. The **VM** produces the dataset and
 pushes it to a *separate* repository, `aleks-drozy/ghost-bus-data`, which holds
 nothing but CSVs and a manifest. **CI** checks that repository out beside the
 code, renders the site from those CSVs, and deploys it.
+
+### 8.0 Upgrading an existing install to P4 (poller + classifier + publisher all as `ubuntu`)
+
+Do this section first, top to bottom, on any VM that installed the poller
+and classifier before `User=ubuntu` existed for them (§2.2), before working
+through the rest of §8 below. §2.2's own upgrade block stops the poller and
+classifier and `chown`s `state/` but never starts them back up — it is
+written for a fresh install, where §2.3 is what does the starting — so
+followed on its own on an *existing* install it leaves both services down.
+And §8.2 never mentions the poller/classifier `User=ubuntu` change or its
+`chown` at all: an operator who follows §8 end to end without this section
+gets a publisher running as `ubuntu` while the poller and classifier stay
+root, recreating root-owned `state/*` files forever — exactly the mixed-UID
+situation `User=ubuntu` was introduced to remove.
+
+1. **Pull first — the order matters.** The `cp` in the next step copies
+   whatever unit files are already sitting on disk. Run it before this pull
+   and it (re)installs the OLD root-owned units from the previous checkout,
+   silently undoing the rest of this section.
+
+   ```bash
+   cd /opt/ghost-bus
+   git pull
+   ```
+
+2. **Copy all five unit files** — poller, both classifier units, and both
+   publisher units — not just whichever one seems to have changed, so none
+   is left stale:
+
+   ```bash
+   sudo cp /opt/ghost-bus/ops/ghostbus-poller.service /etc/systemd/system/
+   sudo cp /opt/ghost-bus/ops/ghostbus-classifier.service /etc/systemd/system/
+   sudo cp /opt/ghost-bus/ops/ghostbus-classifier.timer /etc/systemd/system/
+   sudo cp /opt/ghost-bus/ops/ghostbus-publisher.service /etc/systemd/system/
+   sudo cp /opt/ghost-bus/ops/ghostbus-publisher.timer /etc/systemd/system/
+   sudo systemctl daemon-reload
+   ```
+
+3. **Stop the poller and classifier before touching ownership** — never
+   `chown` files a running process still has open for write:
+
+   ```bash
+   sudo systemctl stop ghostbus-poller.service ghostbus-classifier.service
+   ```
+
+4. **`chown` the whole tree, not just `state/`.** §2.2's own one-time fix
+   names only `/opt/ghost-bus/state`, because on a fresh install nothing
+   else under `/opt/ghost-bus` is root-owned yet. An existing install being
+   brought up to P4 can also have a root-owned `data-repo/` checkout or
+   stray root-owned files elsewhere in the tree from earlier manual
+   debugging, and every one of them has to end up `ubuntu`-owned — a
+   root-owned `data-repo/` refuses `git` operations for the `ubuntu`-run
+   publisher exactly as a root-owned `state/` refuses the poller:
+
+   ```bash
+   sudo chown -R ubuntu:ubuntu /opt/ghost-bus
+   ```
+
+5. **Start the poller and classifier back up:**
+
+   ```bash
+   sudo systemctl start ghostbus-poller.service
+   sudo systemctl start ghostbus-classifier.timer
+   ```
+
+6. **Verify — do not assume the unit change and the `chown` actually took:**
+
+   ```bash
+   systemctl show -p User ghostbus-poller.service      # expect: User=ubuntu
+   ls -l /opt/ghost-bus/state                           # expect: every file owned by ubuntu
+   ```
+
+   A `state/*` file still owned by `root` here means a unit was copied
+   before the `git pull` in step 1, or `daemon-reload` was skipped — stop
+   the affected service, redo steps 1-4, and check again before continuing.
+
+Continue into §8.1 below — it is unaffected by whether this section has
+already run, and covers the one-time GitHub-side setup (the data
+repository, Pages, and the publish token) that a VM only ever needs once,
+upgrade or not.
 
 The separation is what makes the trust boundary real. A token with write
 access to the *code* repository could rewrite `publish/site.py` or a template —

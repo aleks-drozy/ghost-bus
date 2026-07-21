@@ -114,10 +114,33 @@ def uptime_row(db: sqlite3.Connection, day: dt.date) -> dict:
             "uptime_fraction": f"{fraction:.6f}"}
 
 
+def _prune_orphans(directory: Path, wanted_stems: set[str]) -> None:
+    """Delete every `daily/*.csv` (or `uptime/*.csv`) whose date is not in
+    `wanted_stems`.
+
+    Without this, a day that drops out of `days` - a DB restore, a VM
+    rebuild, or an operator deleting bad outcome rows per RUNBOOK 8.4 - keeps
+    its CSV sitting on disk forever, republished untouched by every later run.
+    build_site reads every file in the directory (spec D3), so that orphan
+    keeps entering the published window even though the manifest this same
+    run writes no longer claims that day as coverage: the site would state a
+    coverage the manifest it was built from denies. ops/publish.sh's
+    fetch+reset restores these files from the remote every night, so without
+    this prune the bug is self-perpetuating.
+    """
+    if not directory.is_dir():
+        return
+    for path in directory.glob("*.csv"):
+        if path.stem not in wanted_stems:
+            path.unlink()
+
+
 def write_uptime_csvs(db: sqlite3.Connection, data_dir, days) -> list[Path]:
+    directory = Path(data_dir) / "uptime"
+    _prune_orphans(directory, {day.isoformat() for day in days})
     written = []
     for day in days:
-        path = Path(data_dir) / "uptime" / f"{day.isoformat()}.csv"
+        path = directory / f"{day.isoformat()}.csv"
         _write_csv(path, UPTIME_COLUMNS, [uptime_row(db, day)])
         written.append(path)
     return written
@@ -215,9 +238,11 @@ def daily_rows(db: sqlite3.Connection, service_date: str, names: dict) -> list[d
 def write_daily_csvs(db: sqlite3.Connection, data_dir, days,
                      names: dict) -> list[Path]:
     by_date = daily_rows_by_date(db, names)
+    directory = Path(data_dir) / "daily"
+    _prune_orphans(directory, set(days))
     written = []
     for day in days:
-        path = Path(data_dir) / "daily" / f"{day}.csv"
+        path = directory / f"{day}.csv"
         _write_csv(path, DAILY_COLUMNS, by_date.get(day, []))
         written.append(path)
     return written

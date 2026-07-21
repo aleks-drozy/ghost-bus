@@ -21,6 +21,7 @@ REQUIRED_METHODOLOGY_CLAIMS = [
     "never add",
     "30 trips we could judge",
     "14 complete days",
+    "90%",
 ]
 
 
@@ -28,6 +29,19 @@ def test_methodology_makes_every_required_statement():
     html = render_methodology(SITE_DIR, DEFAULT_MANIFEST).lower()
     missing = [c for c in REQUIRED_METHODOLOGY_CLAIMS if c.lower() not in html]
     assert missing == []
+
+
+def test_methodology_states_the_excluded_uptime_threshold_and_its_limit():
+    """C2: EXCLUDED only fires below 90% tracker uptime over a trip's own
+    window, so up to 10% of a trip can go unwatched and still be judged.
+    Earlier prose said 'a route is never punished for the minutes we were
+    not looking' with no threshold stated anywhere - true only above 90%,
+    false in the 0-10% gap, and it is the one adverse case this page
+    attributes to us rather than to the operator, so it must be named
+    explicitly rather than left implicit."""
+    html = render_methodology(SITE_DIR, DEFAULT_MANIFEST)
+    assert "below 90%" in html
+    assert "Three cases run the other way" in html
 
 
 def test_methodology_never_presents_a_combined_rate():

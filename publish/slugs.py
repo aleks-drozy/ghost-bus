@@ -11,7 +11,11 @@ import re
 from typing import Iterable
 
 _NON_SLUG = re.compile(r"[^a-z0-9]+")
-_VALID_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+# \Z, not $: in Python "$" also matches immediately before a trailing newline,
+# so "safe\n" would pass a check documented as ^[a-z0-9][a-z0-9-]*$ - and \n is
+# a legal POSIX filename character, so CI would publish a route URL containing
+# a raw newline.
+_VALID_SLUG = re.compile(r"[a-z0-9][a-z0-9-]*\Z")
 
 
 class InvalidSlugError(RuntimeError):
@@ -69,6 +73,15 @@ def slug_map(route_ids: Iterable[str],
 
     for route_id in ids:
         slug = (existing or {}).get(route_id)
+        # A non-string (int, list, dict, bool from a doctored or corrupt
+        # manifest) is rejected here rather than being left to blow up inside
+        # the regex with a bare TypeError that names neither the route nor the
+        # file. None is not an error: it means "no published slug", and falls
+        # through to a freshly computed one.
+        if slug is not None and not isinstance(slug, str):
+            raise InvalidSlugError(
+                f"existing slug for route id {route_id!r} is "
+                f"{type(slug).__name__}, not a string: {slug!r}")
         if slug is not None and not _VALID_SLUG.match(slug):
             raise InvalidSlugError(
                 f"existing slug {slug!r} for route id {route_id!r} does not "

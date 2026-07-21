@@ -345,3 +345,55 @@ def test_build_site_does_not_halt_for_a_route_legitimately_named_with_javascript
     build_site(data_dir, out)  # must not raise
     index = (out / "index.html").read_text(encoding="utf-8")
     assert "href=javascript:alert(1)" in index
+
+
+# --- the tag chunker must agree with a browser about where a tag ends -------
+
+@pytest.mark.parametrize("markup", [
+    '<a title=">" href="javascript:alert(1)">x</a>',
+    "<a title='>' href='javascript:alert(1)'>x</a>",
+    '<a class="x>y" href="javascript:alert(1)">x</a>',
+])
+def test_a_quoted_angle_bracket_cannot_hide_a_javascript_url(markup):
+    """The HTML5 tokenizer does NOT end a tag at a ">" inside a quoted
+    attribute value, so a naive <[^>]*> chunker splits before the href and
+    never scans it - while a browser sees one <a> with a live handler.
+
+    This was a real regression: the earlier whole-page scan caught these, and
+    scoping the check to tag chunks silently gave up the catch. Do not
+    "simplify" _TAG_CHUNK back to <[^>]*>.
+    """
+    with pytest.raises(InjectionError):
+        assert_inert(markup)
+
+
+def test_ordinary_quoted_attributes_still_pass():
+    """The quote-aware chunker must not become a false-positive machine."""
+    assert_inert('<td class="num" title="1 of 2">3</td>')
+    assert_inert('<a href="../index.html">Back</a>')
+    assert_inert("<p>plain</p>")
+
+
+# --- the write gate is an allowlist of INERT suffixes, not a denylist -------
+
+@pytest.mark.parametrize("name", ["page.html", "page.htm", "page.HTML",
+                                  "feed.xhtml", "icon.svg", "page.unexpected"])
+def test_live_markup_is_blocked_under_every_non_inert_suffix(tmp_path, name):
+    """.htm/.HTML/.xhtml are served as markup by common hosts and .svg can
+    carry <script>. Gating on == ".html" let all of them through. The gate is
+    an allowlist of inert suffixes so it fails CLOSED for a suffix nobody
+    anticipated - which is the whole point of a chokepoint."""
+    from publish.site import _write
+    with pytest.raises(InjectionError):
+        _write(tmp_path / name, "<p>ok</p><script>alert(1)</script>")
+    assert not (tmp_path / name).exists()
+
+
+@pytest.mark.parametrize("name", ["data.json", "data.csv"])
+def test_inert_data_files_are_written_unscanned(tmp_path, name):
+    """The published dataset legitimately contains raw operator text - it is
+    served as data, not markup, and scanning it would fail the build on a
+    route name we are required to publish verbatim."""
+    from publish.site import _write
+    _write(tmp_path / name, '{"route": "<script>alert(1)</script>"}')
+    assert (tmp_path / name).exists()

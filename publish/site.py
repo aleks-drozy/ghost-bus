@@ -681,18 +681,29 @@ def _claim_output_dir(out_dir: Path) -> None:
             "a fresh or empty directory, or delete this one yourself first.")
 
 
-def _write(path: Path, text: str) -> None:
-    """Write text to path - the single chokepoint every emitted file passes
-    through, .html or not.
+_INERT_SUFFIXES = frozenset({".json", ".csv"})
 
-    assert_inert runs here, gated on the suffix, rather than at each call
-    site inside build_site: a future call site that writes a NEW .html page
-    (bypassing the `pages` dict and the two route loops) gets the guard
-    automatically, because it has no other way to reach disk. Conventionally
-    remembering to call assert_inert at every call site is exactly the kind
-    of discipline-not-enforcement gap this task exists to close.
+
+def _write(path: Path, text: str) -> None:
+    """Write text to path - the chokepoint every file this module RENDERS
+    passes through.
+
+    (style.css is copied, and the dataset and the sentinel are written
+    elsewhere; this is not the only way bytes reach out_dir. It is the only
+    way rendered text does.)
+
+    assert_inert runs here rather than at each call site inside build_site: a
+    future call site that writes a NEW page (bypassing the `pages` dict and
+    the two route loops) gets the guard automatically, because it has no
+    other way to reach disk. Conventionally remembering to call assert_inert
+    at every call site is exactly the discipline-not-enforcement gap this
+    task exists to close.
+
+    The gate is an allowlist of INERT suffixes, not a denylist of dangerous
+    ones. .htm, .HTML, .xhtml and .svg are all served as markup by common
+    hosts, and a denylist fails open for whichever suffix nobody thought of.
     """
-    if path.suffix == ".html":
+    if path.suffix.lower() not in _INERT_SUFFIXES:
         assert_inert(text, str(path))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8", newline="\n")
@@ -726,7 +737,12 @@ _TAG_NAME = re.compile(r"</?([a-zA-Z][^\s/>]*)")
 # triggerable by the same untrusted party this function exists to defend
 # against, and exactly the false-positive class already disclaimed below for
 # 'x onerror=y'.
-_TAG_CHUNK = re.compile(r"<[^>]*>")
+# Quote-aware: the HTML5 tokenizer does NOT end a tag at a ">" inside a quoted
+# attribute value, so a naive <[^>]*> splits <a title=">" href="javascript:...">
+# after the title and never scans the href - while a browser sees one <a> with a
+# live handler. The first alternative consumes balanced quoted runs; the second
+# is the fallback for a tag with no quotes at all.
+_TAG_CHUNK = re.compile(r"""<(?:[^>"']|"[^"]*"|'[^']*')*>|<[^>]*>""")
 _JS_HREF = re.compile(r"""(?:href|src)\s*=\s*["']?\s*javascript:""", re.IGNORECASE)
 
 

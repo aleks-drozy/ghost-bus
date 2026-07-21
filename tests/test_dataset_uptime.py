@@ -74,6 +74,49 @@ def test_local_today_returns_a_date():
     assert isinstance(local_today(), dt.date)
 
 
+def test_spring_forward_day_has_1380_expected_minutes_and_full_uptime():
+    # 2027-03-28: Europe/Dublin loses an hour (confirmed via zoneinfo scan:
+    # offset 0:00 -> 1:00 on this date), so the local day is really 1380
+    # minutes. Full coverage must read as fraction 1.0, not the flat-1440
+    # 1380/1440 = 0.958 that would understate a perfect day.
+    day = dt.date(2027, 3, 28)
+    start, end = day_bounds_utc(day)
+    heartbeats = []
+    ts = start
+    while ts < end:
+        heartbeats.append((ts.isoformat(), 1))
+        ts += dt.timedelta(minutes=1)
+    db = build_db(heartbeats=heartbeats)
+    row = uptime_row(db, day)
+    assert row["expected_minutes"] == 1380
+    assert row["uptime_fraction"] == "1.000000"
+
+
+def test_fall_back_day_has_1500_expected_minutes_and_reveals_masked_downtime():
+    # 2027-10-31: Europe/Dublin gains an hour (confirmed via zoneinfo scan:
+    # offset 1:00 -> 0:00 on this date), so the local day is really 1500
+    # minutes. Exactly 1440 ok minutes - a full flat-1440 day's worth - still
+    # leaves a real hour of downtime. A flat denominator would clamp this to
+    # fraction 1.0 and hide that hour entirely; this is the case that matters.
+    day = dt.date(2027, 10, 31)
+    start, end = day_bounds_utc(day)
+    heartbeats = []
+    ts = start
+    for _ in range(1440):
+        heartbeats.append((ts.isoformat(), 1))
+        ts += dt.timedelta(minutes=1)
+    db = build_db(heartbeats=heartbeats)
+    row = uptime_row(db, day)
+    assert row["expected_minutes"] == 1500
+    assert row["ok_minutes"] == 1440
+    assert float(row["uptime_fraction"]) < 1.0
+
+
+def test_ordinary_day_still_has_1440_expected_minutes():
+    db = build_db()
+    assert uptime_row(db, dt.date(2026, 3, 23))["expected_minutes"] == 1440
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
 def test_published_dataset_paths_are_not_git_ignored():
     """An ignored data/ makes the whole publish pipeline a silent no-op.

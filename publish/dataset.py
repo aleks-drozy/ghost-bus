@@ -18,14 +18,6 @@ BASELINE_REQUIRED_DAYS = 14
 LOCAL_TZ = "Europe/Dublin"
 UTC = dt.timezone.utc
 
-# A service day is credited with a flat 1440 expected minutes. On the two DST
-# days the local day is really 1380 or 1500 minutes long. Holding the
-# denominator fixed keeps the published series comparable; the cost is that on
-# the spring-forward day we understate our own uptime, and on the fall-back day
-# a clamped 1.000000 can mask up to 60 minutes of downtime. Both are stated on
-# the about-data page rather than silently corrected.
-EXPECTED_MINUTES_PER_DAY = 1440
-
 UPTIME_COLUMNS = ("service_date", "expected_minutes", "ok_minutes", "uptime_fraction")
 
 
@@ -53,6 +45,21 @@ def day_bounds_utc(day: dt.date, tz: str = LOCAL_TZ) -> tuple[dt.datetime, dt.da
     return start.astimezone(UTC), end.astimezone(UTC)
 
 
+def expected_minutes(day: dt.date, tz: str = LOCAL_TZ) -> int:
+    """The true length of one local service day, in minutes.
+
+    Derived from day_bounds_utc rather than assumed flat: on the two DST
+    transition days the local day is really 1380 or 1500 minutes, not 1440. A
+    flat denominator would understate uptime on the short day, and - the
+    error that matters - would let min(1.0, ...) clamp on the long day and
+    silently hide up to 60 minutes of real downtime. Uptime exists to hold
+    the tracker itself accountable, so it must never be the one number able
+    to hide the tracker's own outage.
+    """
+    start, end = day_bounds_utc(day, tz)
+    return int((end - start).total_seconds() / 60)
+
+
 def uptime_days(db: sqlite3.Connection, today: dt.date) -> list[dt.date]:
     """Every complete local service day from the first heartbeat to yesterday.
 
@@ -72,15 +79,18 @@ def uptime_days(db: sqlite3.Connection, today: dt.date) -> list[dt.date]:
 
 def uptime_row(db: sqlite3.Connection, day: dt.date) -> dict:
     start, end = day_bounds_utc(day)
+    expected = expected_minutes(day)
     # Distinct minute buckets, not raw rows - matches classify.store.uptime, so
     # a crash-loop cannot inflate the published figure.
     (ok_minutes,) = db.execute(
         "SELECT COUNT(DISTINCT substr(ts_utc,1,16)) FROM heartbeats "
         "WHERE ok=1 AND ts_utc>=? AND ts_utc<?",
         (start.isoformat(), end.isoformat())).fetchone()
-    fraction = min(1.0, ok_minutes / EXPECTED_MINUTES_PER_DAY)
+    # min() now only guards a genuinely impossible over-count - with a correct
+    # per-day denominator it can no longer mask a real hour of downtime.
+    fraction = min(1.0, ok_minutes / expected)
     return {"service_date": day.isoformat(),
-            "expected_minutes": EXPECTED_MINUTES_PER_DAY,
+            "expected_minutes": expected,
             "ok_minutes": ok_minutes,
             "uptime_fraction": f"{fraction:.6f}"}
 

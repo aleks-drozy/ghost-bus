@@ -79,6 +79,34 @@ def test_build_site_refuses_a_non_csv_under_daily(tmp_path):
         build_site(data, tmp_path / "_site")
 
 
+def test_build_site_refuses_a_daily_csv_dated_outside_manifest_coverage(tmp_path):
+    """C1(b): the D3-shaped structural guard.
+
+    This module never opens the database, and must not simply trust that the
+    daily/ directory and the manifest it was handed still agree - a
+    publisher bug that regresses the C1 prune, a partial push, or a manifest
+    edited by hand can all leave a daily CSV dated outside the range the
+    manifest's own coverage claims. That is exactly what an un-pruned orphan
+    CSV looks like from this side of the split, and build_site must refuse to
+    render it rather than silently publish a coverage the manifest denies.
+    """
+    daily = [
+        day_rows("BIG", 200, vanished=8, untracked=4,
+                 route_short_name="1", route_long_name="Fixtureville Main",
+                 agency_name="Fixtureville Bus"),
+        day_rows("BIG", 200, vanished=8, untracked=4, day="2026-06-29",
+                 route_short_name="1", route_long_name="Fixtureville Main",
+                 agency_name="Fixtureville Bus"),
+    ]
+    data = write_dataset(
+        tmp_path / "data", daily_rows=daily,
+        uptime_rows=[uptime_row("2026-06-28", 1440, 1440)],
+        manifest={"coverage": {"first_day": "2026-06-28", "last_day": "2026-06-28",
+                               "complete_days": 28}})
+    with pytest.raises(DatasetError):
+        build_site(data, tmp_path / "_site")
+
+
 def test_build_site_refuses_route_data_behind_a_pre_baseline_page(tmp_path):
     data = ready_dataset(tmp_path)
     manifest = json.loads((data / "manifest.json").read_text(encoding="utf-8"))

@@ -26,9 +26,9 @@ window = scheduled start − 5 min → scheduled end + 15 min.
 |---|---|
 | EXCLUDED | poller uptime < 90% of the trip window → excluded from operator stats, counted publicly as tracker downtime |
 | CANCELLED | feed marks the trip `CANCELED` at any point in the window |
-| COMPLETED | observed, and last observation shows stop-sequence progress ≥ 90% OR is within 10 min of the scheduled final-stop time |
+| COMPLETED | observed, and the highest stop-sequence progress reached across *all* reports (feed `stop_sequence` merged with our geographic match by taking the maximum, never the last report alone) is ≥ 90% of the trip, OR the last report we have is at or after 10 minutes before the scheduled end — one-sided, so any report after the scheduled end also satisfies this |
 | VANISHED | observed, then no signal for the rest of the window with progress < 75% and > 15 min left — tracked, then gone mid-route |
-| UNTRACKED | zero observations in the whole window (uptime ≥ 90%) — the classic ghost. Reported as *untracked*, not "did not run": a dead telematics unit looks identical to a bus that never left the depot, and we say so |
+| UNTRACKED | zero vehicle *position* observations in the whole window (uptime ≥ 90%) — the classic ghost. A TripUpdate prediction alone is not proof a vehicle exists, so a trip with TripUpdate rows and no position ping is still untracked. Reported as *untracked*, not "did not run": a dead telematics unit looks identical to a bus that never left the depot, and we say so |
 
 One residual case is decided in the operator's favour: a trip that is
 neither clearly completed nor clearly vanished (including any trip last

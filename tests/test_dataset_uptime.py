@@ -53,6 +53,21 @@ def test_day_with_no_heartbeats_is_written_as_a_visible_zero(tmp_path):
     assert gap.splitlines()[1] == "2026-03-24,1440,0,0.000000"
 
 
+def test_write_uptime_csvs_prunes_a_csv_whose_day_dropped_out_of_coverage(tmp_path):
+    """C1's uptime mirror of the daily-csv prune: an uptime CSV whose day is
+    no longer in `days` must be removed, not left behind for build_site's
+    directory scan to read back."""
+    db = build_db()
+    day1, day2 = dt.date(2026, 3, 23), dt.date(2026, 3, 24)
+    write_uptime_csvs(db, tmp_path, [day1, day2])
+    assert sorted(p.name for p in (tmp_path / "uptime").iterdir()) == \
+        ["2026-03-23.csv", "2026-03-24.csv"]
+
+    write_uptime_csvs(db, tmp_path, [day1])
+    assert sorted(p.name for p in (tmp_path / "uptime").iterdir()) == \
+        ["2026-03-23.csv"]
+
+
 def test_day_boundary_is_local_not_utc():
     # 23:30Z on 14 July is 00:30 local (Dublin is UTC+1 in summer), so the
     # heartbeat belongs to service day 2026-07-15.
@@ -118,18 +133,23 @@ def test_ordinary_day_still_has_1440_expected_minutes():
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
-def test_published_dataset_paths_are_not_git_ignored():
-    """An ignored data/ makes the whole publish pipeline a silent no-op.
+def test_local_data_directory_is_git_ignored():
+    """M1: Task 4 un-ignored data/ back when the published dataset was going
+    to live in THIS repository. Task 18 moved the real dataset out to the
+    separate `ghost-bus-data` repo (cloned by ops/publish.sh into
+    data-repo/, itself gitignored below) and nothing re-ignored data/ here
+    afterwards.
 
-    `git add -- data` would stage nothing, `git diff --cached --quiet` would
-    exit 0, and the publisher would print "dataset unchanged, nothing to push"
-    every night while publishing nothing at all.
+    Left un-ignored, one default-args `python -m publish.dataset` run from
+    `/opt/ghost-bus` (no `--data-dir`, which is exactly what an operator
+    debugging by hand would run) writes straight into this checkout's own
+    data/, turns up as untracked files under `git status --porcelain`, and
+    wedges ops/publish.sh's dirty-checkout guard every night after - the
+    inverse of the failure this test's predecessor
+    (test_published_dataset_paths_are_not_git_ignored, when data/ WAS the
+    real publish target) used to guard against.
     """
     for path in ("data/manifest.json", "data/daily/2026-03-23.csv",
-                 "data/uptime/2026-03-23.csv"):
+                 "data/uptime/2026-03-23.csv", "data/probe/vehicles.pb"):
         proc = subprocess.run(["git", "check-ignore", "-q", path], cwd=REPO)
-        assert proc.returncode == 1, f"{path} is git-ignored"
-    # The probe captures stay ignored - they are binary fixtures, not output.
-    proc = subprocess.run(["git", "check-ignore", "-q", "data/probe/vehicles.pb"],
-                          cwd=REPO)
-    assert proc.returncode == 0, "data/probe/ must stay ignored"
+        assert proc.returncode == 0, f"{path} must be git-ignored"

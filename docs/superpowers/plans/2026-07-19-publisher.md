@@ -6248,7 +6248,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `C:\Users\Alex\ObsidianVault\claude-memory\19-ghost-bus\_INDEX.md` (frontmatter `updated:`, the `Last updated:` line, the "Public repo" line, and a new first bullet under `## Status`)
-- Modify: `C:\Users\Alex\ObsidianVault\claude-memory\19-ghost-bus\DECISIONS.md` (frontmatter `updated:`, `Last updated:` line, four new entries inserted at the top of the entry list — decisions are most-recent-first)
+- Modify: `C:\Users\Alex\ObsidianVault\claude-memory\19-ghost-bus\DECISIONS.md` (frontmatter `updated:`, `Last updated:` line, five new entries inserted at the top of the entry list — decisions are most-recent-first)
 - Modify: `C:\Users\Alex\ObsidianVault\claude-memory\19-ghost-bus\KNOWN_ISSUES.md` (frontmatter `updated:`, new top section)
 - Test: a PowerShell verification block — the vault lives outside the repo and is not on `pytest`'s `testpaths`, and a public repo must not carry a test that reads a machine-local absolute path.
 
@@ -6277,6 +6277,7 @@ if (-not (Select-String -Path "$v\DECISIONS.md"    -SimpleMatch "Two rates, neve
 if (-not (Select-String -Path "$v\DECISIONS.md"    -SimpleMatch "Wilson lower bound" -Quiet)) { $ok = $false; Write-Output "MISSING: Wilson decision" }
 if (-not (Select-String -Path "$v\DECISIONS.md"    -SimpleMatch "split trust" -Quiet)) { $ok = $false; Write-Output "MISSING: split-trust decision" }
 if (-not (Select-String -Path "$v\DECISIONS.md"    -SimpleMatch "gate counts trips judged" -Quiet)) { $ok = $false; Write-Output "MISSING: judged-trips gate decision" }
+if (-not (Select-String -Path "$v\DECISIONS.md"    -SimpleMatch "slug map lives in the published dataset" -Quiet)) { $ok = $false; Write-Output "MISSING: slug-map decision" }
 if (-not (Select-String -Path "$v\KNOWN_ISSUES.md" -SimpleMatch "baseline gate" -Quiet)) { $ok = $false; Write-Output "MISSING: known-issues baseline entry" }
 if (Select-String -Path "$v\_INDEX.md" -SimpleMatch "<COMMIT>" -Quiet) { $ok = $false; Write-Output "MISSING: <COMMIT> placeholder not filled in" }
 if (Select-String -Path "$v\_INDEX.md" -SimpleMatch "<COUNT>" -Quiet) { $ok = $false; Write-Output "MISSING: <COUNT> placeholder not filled in" }
@@ -6287,7 +6288,7 @@ if ($ok) { Write-Output "PUBLISHER-DOCS-OK" }
 
 Run the PowerShell block above.
 
-Expected: FAIL — prints six `MISSING:` lines (`_INDEX status line`, `split-rates decision`, `Wilson decision`, `split-trust decision`, `judged-trips gate decision`, `known-issues baseline entry`) and does **not** print `PUBLISHER-DOCS-OK`. The two placeholder checks do not fire yet, because the lines containing them do not exist.
+Expected: FAIL — prints seven `MISSING:` lines (`_INDEX status line`, `split-rates decision`, `Wilson decision`, `split-trust decision`, `judged-trips gate decision`, `slug-map decision`, `known-issues baseline entry`) and does **not** print `PUBLISHER-DOCS-OK`. The two placeholder checks do not fire yet, because the lines containing them do not exist.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -6323,7 +6324,7 @@ and insert this as the **first** bullet under `## Status` (with `<COMMIT>` and `
   exist. Details: [[DECISIONS]], [[KNOWN_ISSUES]], `ops/RUNBOOK.md` §8.
 ```
 
-**`DECISIONS.md`** — set the frontmatter `updated: 2026-07-20` and `Last updated: 2026-07-20`, then insert these four entries immediately after the `---` that follows the `Every non-obvious decision, most recent first.` line, above the existing 2026-07-19 entries:
+**`DECISIONS.md`** — set the frontmatter `updated: 2026-07-20` and `Last updated: 2026-07-20`, then insert these five entries immediately after the `---` that follows the `Every non-obvious decision, most recent first.` line, above the existing 2026-07-19 entries:
 
 ```markdown
 ## 2026-07-20 — Two rates, never summed
@@ -6410,6 +6411,32 @@ own origin.
 **Impact:** `ops/publish.sh`, `ops/git-askpass.sh`,
 `ops/ghostbus-publisher.{service,timer}`, `.github/workflows/publish.yml`,
 `publish/site.py` (`_copy_dataset`, `DatasetError`), RUNBOOK §8.
+
+## 2026-07-20 — The route slug map lives in the published dataset
+**Decision:** the route-id → URL-slug map is persisted as `route_slugs` in
+`data/manifest.json`, written by the VM alongside the CSVs, **not** beside the
+site build. `publish/slugs.py` holds `slugify`/`slug_map` and is shared by
+`publish/dataset.py` and `publish/site.py`, so neither imports the other. The
+publisher also carries entries forward for route ids that have dropped out of the
+current window; the builder takes the map as given and computes a slug only for
+an id the map does not carry.
+**Why:** the site is built solely by GitHub Actions (see split trust, above),
+which checks out into a brand-new `_site` on an ephemeral runner every run. A map
+kept with the build output would therefore read back **empty every time** — the
+stable-URL guarantee would be inert in production while still passing a test that
+rebuilt into one reused output directory inside a single process. The dataset
+manifest is checked out with the data, so the builder always sees the real
+previous map, and once a route page has a URL that URL is permanent. Carrying
+retired ids forward means a link to a withdrawn route keeps resolving to that
+route rather than being silently reassigned to a different one.
+**Impact:** `publish/slugs.py` (new, shared), `route_slugs` in the manifest
+schema, `publish/dataset.py` (`published_slugs`, `read_published_slugs`),
+`publish/site.py` (`build_site` reads the dataset's map instead of its own
+previous output). Pinned by a test that builds twice into **two different fresh
+output directories** and asserts the route URLs are identical; a rebuild into one
+reused directory would not have caught this.
+**Caught by the pre-flight scan of the plan**, before any of this code was
+written — not in review, and not in production.
 ```
 
 **`KNOWN_ISSUES.md`** — set the frontmatter `updated: 2026-07-20` and insert this section immediately after the `# Ghost Bus Tracker — Known Issues` heading block, above the current top section:

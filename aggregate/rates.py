@@ -27,7 +27,11 @@ def wilson_interval(successes: int, trials: int, z: float = 1.96
     lo = max(0.0, centre - margin)
     hi = min(1.0, centre + margin)
 
-    # Handle floating point precision for exact boundaries
+    # Floating-point precision: for k=0, centre-margin can be ~1e-17 instead
+    # of exactly 0.0 for certain n (11, 22, 27); for k=n, centre+margin can be
+    # 0.9999999999999999 instead of exactly 1.0 (n=6, 21, 31, 38). These boundary
+    # checks ensure exact semantics: an undefined rate (0 trials) is never reported,
+    # and a guaranteed rate (100% success) is never reported as less than 1.0.
     if successes == 0:
         lo = 0.0
     if successes == trials:

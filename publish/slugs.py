@@ -11,6 +11,23 @@ import re
 from typing import Iterable
 
 _NON_SLUG = re.compile(r"[^a-z0-9]+")
+_VALID_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+class InvalidSlugError(RuntimeError):
+    """Raised when a published route_slugs entry is not a safe, slug-shaped string.
+
+    route_slugs in data/manifest.json is written by the VM's own publisher,
+    but the site builder reads it back across a process (and deploy)
+    boundary and treats it as untrusted, same as any other manifest field
+    (see tests/test_site_escaping.py). publish/site.py's build_site
+    interpolates a route's slug directly into a filesystem path
+    (out_dir/route/<slug>.html), so an entry like "../../pwned" is not a slug
+    to fall back from quietly - slugify never produces one, so seeing one
+    means the manifest is corrupt or tampered, and accepting it would let a
+    doctored manifest write outside the directory _claim_output_dir exists
+    to fence.
+    """
 
 
 def slugify(route_id: str) -> str:
@@ -38,6 +55,13 @@ def slug_map(route_ids: Iterable[str],
     slugifying the same way would take the bare slug and move the incumbent's
     published URL. publish/dataset.py feeds the previously published map in for
     exactly that reason.
+
+    Every value in `existing` must match the same [a-z0-9][a-z0-9-]* shape
+    slugify produces, or InvalidSlugError is raised: this function's caller
+    interpolates the result straight into a filesystem path, so a malformed
+    entry (e.g. "../../pwned") halts the build rather than being silently
+    reassigned a fresh slug, which would move a published URL without saying
+    so.
     """
     ids = sorted(set(route_ids))
     mapping: dict[str, str] = {}
@@ -45,6 +69,10 @@ def slug_map(route_ids: Iterable[str],
 
     for route_id in ids:
         slug = (existing or {}).get(route_id)
+        if slug is not None and not _VALID_SLUG.match(slug):
+            raise InvalidSlugError(
+                f"existing slug {slug!r} for route id {route_id!r} does not "
+                "match the safe filename shape ^[a-z0-9][a-z0-9-]*$")
         if slug and slug not in used:
             mapping[route_id] = slug
             used.add(slug)

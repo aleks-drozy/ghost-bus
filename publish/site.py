@@ -682,6 +682,18 @@ def _claim_output_dir(out_dir: Path) -> None:
 
 
 def _write(path: Path, text: str) -> None:
+    """Write text to path - the single chokepoint every emitted file passes
+    through, .html or not.
+
+    assert_inert runs here, gated on the suffix, rather than at each call
+    site inside build_site: a future call site that writes a NEW .html page
+    (bypassing the `pages` dict and the two route loops) gets the guard
+    automatically, because it has no other way to reach disk. Conventionally
+    remembering to call assert_inert at every call site is exactly the kind
+    of discipline-not-enforcement gap this task exists to close.
+    """
+    if path.suffix == ".html":
+        assert_inert(text, str(path))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8", newline="\n")
 
@@ -698,7 +710,23 @@ ALLOWED_TAGS = frozenset({
     "dl", "dt", "dd", "span", "strong", "em", "code", "small", "abbr", "br", "hr",
 })
 
-_TAG_NAME = re.compile(r"</?([a-zA-Z][a-zA-Z0-9]*)")
+# The FULL tag name, not just its leading alphanumeric run: 'a-x' and
+# 'a:script' both start with the allowlisted letter 'a', but neither IS 'a' -
+# 'a-x' is a distinct custom-element tag name, and browsers still fire
+# global event-handler content attributes (onmouseover, etc.) on an unknown
+# element. Stopping at the first non-alphanumeric character would let a
+# hostile tag slip past the allowlist just by sharing a prefix with a
+# legitimate one.
+_TAG_NAME = re.compile(r"</?([a-zA-Z][^\s/>]*)")
+# Scoped to a single tag's own text (see _TAG_CHUNK below), not the whole
+# page: esc() does not touch '=' or ':', so a route legitimately named
+# 'href=javascript:alert(1)' renders as those literal characters sitting in
+# ordinary text, never inside a real tag. Scanning the whole page for this
+# substring would halt the build over inert prose - an availability bug
+# triggerable by the same untrusted party this function exists to defend
+# against, and exactly the false-positive class already disclaimed below for
+# 'x onerror=y'.
+_TAG_CHUNK = re.compile(r"<[^>]*>")
 _JS_HREF = re.compile(r"""(?:href|src)\s*=\s*["']?\s*javascript:""", re.IGNORECASE)
 
 
@@ -711,17 +739,26 @@ def assert_inert(text: str, source: str = "") -> None:
     ever slips through, it produces a real tag, that tag is not on the
     allowlist, and the build stops rather than shipping it.
 
-    Deliberately a tag-name allowlist and not an attribute scan: a route
-    legitimately named 'x onerror=y' must not fail the build, and once escaped
-    it cannot do anything anyway. The field-agnostic verbatim-payload test in
-    tests/test_site_escaping.py covers what this cannot see.
+    Deliberately a tag-name allowlist and not a general attribute scan: a
+    route legitimately named 'x onerror=y' must not fail the build, and once
+    escaped it cannot do anything anyway. The field-agnostic verbatim-payload
+    test in tests/test_site_escaping.py covers what this cannot see. One
+    exception is carved out on purpose: a javascript: URL in an href/src,
+    because that can hide inside a tag name this allowlist legitimately
+    accepts everywhere (<a>) - see _JS_HREF. This is still not a general
+    attribute scan: an ALLOWED tag carrying some other live attribute (e.g.
+    <p onmouseover="...">, <meta http-equiv="refresh">) is deliberately not
+    caught here; that class of injection requires an unescaped field to reach
+    the template in the first place, same as everywhere else this guard
+    protects, and is out of scope for a tag-name-and-one-scheme check.
     """
     where = f" in {source}" if source else ""
     for name in _TAG_NAME.findall(text):
         if name.lower() not in ALLOWED_TAGS:
             raise InjectionError(f"disallowed <{name}> tag{where}")
-    if _JS_HREF.search(text):
-        raise InjectionError(f"javascript: URL{where}")
+    for chunk in _TAG_CHUNK.findall(text):
+        if _JS_HREF.search(chunk):
+            raise InjectionError(f"javascript: URL{where}")
 
 
 def _copy_dataset(data_dir: Path, dest: Path) -> None:
@@ -793,6 +830,8 @@ def build_site(data_dir, out_dir, site_dir=SITE_DIR) -> dict:
         # The publisher assigns a slug to every route it publishes, so the map
         # should already cover all of these; slug_map fills in anything missing
         # rather than raising mid-build, and never moves a published entry.
+        # (slug_map itself now validates any incumbent slug it is fed - see
+        # InvalidSlugError - so a doctored route_slugs entry halts here.)
         slugs = slug_map((entry["route_id"] for entry in ranked + unranked),
                          existing=manifest.get("route_slugs") or {})
 
@@ -804,7 +843,8 @@ def build_site(data_dir, out_dir, site_dir=SITE_DIR) -> dict:
         "about-data.html": render_about_data(site_dir, manifest, data_dir),
     }
     for name, text in pages.items():
-        assert_inert(text, name)
+        # _write itself enforces assert_inert for every .html file (the
+        # chokepoint); no explicit call is needed here.
         _write(out_dir / name, text)
     shutil.copyfile(site_dir / "style.css", out_dir / "style.css")
 
@@ -814,14 +854,12 @@ def build_site(data_dir, out_dir, site_dir=SITE_DIR) -> dict:
     if ready:
         for position, entry in enumerate(ranked, start=1):
             name = f"{slugs[entry['route_id']]}.html"
-            text = render_route(site_dir, manifest, entry, daily_rows, slugs, position)
-            assert_inert(text, f"route/{name}")
-            _write(route_dir / name, text)
+            _write(route_dir / name,
+                   render_route(site_dir, manifest, entry, daily_rows, slugs, position))
         for entry in unranked:
             name = f"{slugs[entry['route_id']]}.html"
-            text = render_route(site_dir, manifest, entry, daily_rows, slugs, None)
-            assert_inert(text, f"route/{name}")
-            _write(route_dir / name, text)
+            _write(route_dir / name,
+                   render_route(site_dir, manifest, entry, daily_rows, slugs, None))
 
     _copy_dataset(data_dir, out_dir / "data")
 

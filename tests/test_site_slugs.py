@@ -1,4 +1,6 @@
-from publish.slugs import slug_map, slugify
+import pytest
+
+from publish.slugs import InvalidSlugError, slug_map, slugify
 
 
 def test_slugify_lowercases_and_replaces_spaces():
@@ -60,3 +62,29 @@ def test_slug_map_ignores_an_existing_entry_for_a_route_that_is_gone():
     # publish/dataset.py is what carries a retired route's slug forward, by
     # passing its id back in alongside the live ones (Task 8).
     assert got == {"zzz": "zzz-9"}
+
+
+def test_slug_map_rejects_a_path_traversal_slug():
+    """route_slugs in manifest.json is read back across a process boundary
+    (publish/site.py's build_site interpolates it straight into a filesystem
+    path), so a malformed entry here is not a slug to fall back from quietly
+    - it means the manifest is corrupt or tampered."""
+    with pytest.raises(InvalidSlugError):
+        slug_map(["SAFE"], existing={"SAFE": "../../pwned"})
+
+
+def test_slug_map_rejects_an_absolute_path_slug():
+    with pytest.raises(InvalidSlugError):
+        slug_map(["SAFE"], existing={"SAFE": "/etc/passwd"})
+
+
+def test_slug_map_rejects_an_existing_slug_with_disallowed_characters():
+    for bad in ("Not Valid!", "has spaces", "UPPERCASE", "", "-leading-hyphen",
+                "trailing/slash", "back\\slash", "dot.dot"):
+        with pytest.raises(InvalidSlugError):
+            slug_map(["SAFE"], existing={"SAFE": bad})
+
+
+def test_slug_map_accepts_a_well_formed_existing_slug():
+    got = slug_map(["SAFE"], existing={"SAFE": "safe-route-2"})
+    assert got == {"SAFE": "safe-route-2"}

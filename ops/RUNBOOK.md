@@ -87,15 +87,25 @@ never committed, never logged, and is the only copy of the secret outside
 the NTA developer portal itself.
 
 Before installing any credential into this file (including `GHOSTBUS_PUBLISH_TOKEN`
-in Task 19's publisher setup), verify the box has no global git credential
-cache that could bypass `GIT_ASKPASS` and write a secret to disk in plain text:
+in Task 19's publisher setup), check for a persistent git credential cache in
+every scope that could matter. `GIT_ASKPASS` only answers git's password
+prompt — it does not stop git from also handing a successful credential to
+every configured `credential.helper`'s `store` action afterward. `publish.sh`
+already neutralises this in code (`GIT_CONFIG_NOSYSTEM=1` plus
+`-c credential.helper=` on every network-touching git command), so this is
+belt-and-braces, not the primary defence — and it must inspect the account
+that actually runs `ghostbus-publisher.service`. That unit has no `User=`, so
+it runs as **root**, not `ubuntu`; checking `ubuntu`'s own `--global` config
+(as an earlier version of this note did) inspects an account the publisher
+never runs as, and misses `/etc/gitconfig` (system scope) entirely.
 
 ```bash
-git config --global --get credential.helper   # expect: no output
+sudo git config --list --show-origin | grep -i credential   # expect: no output
 ```
 
-If it prints anything (e.g. `store` or `cache`), unset it before proceeding —
-`sudo -u ubuntu git config --global --unset credential.helper`.
+If anything prints, find and unset it in the scope shown (`file:/etc/gitconfig`,
+`file:/root/.gitconfig`, or the data-repo checkout's own `.git/config`) —
+e.g. `sudo git config --system --unset credential.helper` for system scope.
 
 ### 2.2 Install the systemd units
 

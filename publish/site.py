@@ -88,3 +88,58 @@ def render_page(site_dir, *, title: str, root: str, current: str,
         generated_at=esc(generated_at),
         content=content,
     )
+
+
+def _to_int(value) -> int:
+    if value in ("", None):
+        return 0
+    return int(value)
+
+
+def _to_float(value) -> float | None:
+    """Blank means undefined, and undefined is never 0.0 (spec failure table)."""
+    if value in ("", None):
+        return None
+    return float(value)
+
+
+def read_manifest(data_dir) -> dict:
+    return json.loads((Path(data_dir) / "manifest.json").read_text(encoding="utf-8"))
+
+
+def read_daily(data_dir) -> list[dict]:
+    """Every row of every data/daily/*.csv, oldest file first.
+
+    An absent daily/ directory is not an error: before the 14-day baseline the
+    publisher writes none, and that is the documented state of the dataset.
+    """
+    directory = Path(data_dir) / "daily"
+    if not directory.is_dir():
+        return []
+    rows: list[dict] = []
+    for path in sorted(directory.glob("*.csv")):
+        with path.open(newline="", encoding="utf-8") as fh:
+            for raw in csv.DictReader(fh):
+                row = dict(raw)
+                for field in COUNT_FIELDS:
+                    row[field] = _to_int(row.get(field))
+                for field in RATE_FIELDS:
+                    row[field] = _to_float(row.get(field))
+                rows.append(row)
+    return rows
+
+
+def read_uptime(data_dir) -> list[dict]:
+    directory = Path(data_dir) / "uptime"
+    if not directory.is_dir():
+        return []
+    rows: list[dict] = []
+    for path in sorted(directory.glob("*.csv")):
+        with path.open(newline="", encoding="utf-8") as fh:
+            for raw in csv.DictReader(fh):
+                row = dict(raw)
+                row["expected_minutes"] = _to_int(row.get("expected_minutes"))
+                row["ok_minutes"] = _to_int(row.get("ok_minutes"))
+                row["uptime_fraction"] = _to_float(row.get("uptime_fraction"))
+                rows.append(row)
+    return rows

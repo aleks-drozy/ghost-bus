@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import json
+import shutil
 import sqlite3
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from aggregate.rollup import route_day_rollup
+from publish.slugs import slug_map
 from run_checks import check_conservation, check_outcomes_valid, check_rates_bounded
 
 SCHEMA_VERSION = 1
@@ -262,3 +265,118 @@ def timetable_loaded_at(db: sqlite3.Connection) -> str:
     unknown; it is never back-filled with a guess.
     """
     return _meta(db, "gtfs_loaded_at")
+
+
+def published_route_ids(db: sqlite3.Connection, days: list[str]) -> list[str]:
+    """Every route id appearing in the published service days."""
+    if not days:
+        return []
+    # A range, not an IN list: `days` grows by one per day forever and would
+    # eventually blow past SQLite's bound-parameter limit.
+    return sorted({r for (r,) in db.execute(
+        "SELECT DISTINCT route_id FROM trip_outcomes "
+        "WHERE service_date BETWEEN ? AND ?", (days[0], days[-1]))})
+
+
+def read_published_slugs(data_dir) -> dict[str, str]:
+    """The route_slugs map from the manifest we published last time.
+
+    The map lives in the dataset rather than beside the previous site build
+    because the site is rebuilt from scratch on an ephemeral CI runner every
+    run: a map kept in the site output would always read back empty, and a
+    route page's public URL could move whenever route ids changed. data/ is a
+    working copy of what is already public, so this file is the real previous
+    map. A missing or unreadable manifest means "nothing published yet".
+    """
+    path = Path(data_dir) / "manifest.json"
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("route_slugs") or {}
+    except (ValueError, OSError):
+        return {}
+
+
+def published_slugs(route_ids, previous: dict[str, str]) -> dict[str, str]:
+    """The map to publish: every current route, plus every route ever published.
+
+    Retired route ids are fed back through slug_map alongside the live ones, so
+    they keep the slug they were published under and go on reserving it. A link
+    to a route that has since been withdrawn therefore still resolves to that
+    route, and can never be silently handed to a different one. slug_map's own
+    rule is unchanged - on its own it drops ids it was not asked about, which is
+    exactly why the carry-forward is done here and not there.
+    """
+    return slug_map(set(route_ids) | set(previous), existing=previous)
+
+
+def build_manifest(db: sqlite3.Connection, days: list[str], gate: dict,
+                   names: dict, slugs: dict, now_utc: dt.datetime) -> dict:
+    """The machine-readable description of this release. Pure: writes nothing."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": now_utc.astimezone(UTC).replace(microsecond=0).isoformat(),
+        "timetable_hash": timetable_hash(db),
+        "timetable_loaded_at": timetable_loaded_at(db),
+        "coverage": {"first_day": days[0] if days else None,
+                     "last_day": days[-1] if days else None,
+                     "complete_days": len(days)},
+        "scoreboard_ready": len(days) >= BASELINE_REQUIRED_DAYS,
+        "baseline_required_days": BASELINE_REQUIRED_DAYS,
+        "gate": {"conservation": gate["conservation"],
+                 "rates_bounded": gate["rates_bounded"],
+                 "outcomes_valid": gate["outcomes_valid"]},
+        # The poller archives exactly one snapshot per successful poll, and
+        # writes an ok=1 heartbeat in the same step, so ok heartbeats are the
+        # snapshot count without walking the archive directory.
+        "counts": {"observations": _count(db, "SELECT COUNT(*) FROM observations"),
+                   "snapshots": _count(db, "SELECT COUNT(*) FROM heartbeats WHERE ok=1"),
+                   "trips_classified": _count(db, "SELECT COUNT(*) FROM trip_outcomes")},
+        "unnamed_routes": unnamed_routes(db, names),
+        # Published here, not in the site output: CI checks this file out and
+        # rebuilds _site from scratch every run, so this is the only copy that
+        # survives to keep route URLs where they are.
+        "route_slugs": dict(slugs),
+    }
+
+
+def write_manifest(data_dir, manifest: dict) -> Path:
+    data_dir = Path(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / "manifest.json"
+    path.write_text(json.dumps(manifest, indent=2) + "\n",
+                    encoding="utf-8", newline="\n")
+    return path
+
+
+def write_dataset(db: sqlite3.Connection, data_dir, *,
+                  today: dt.date | None = None,
+                  now_utc: dt.datetime | None = None) -> dict:
+    """Write the whole published dataset and return the manifest describing it."""
+    data_dir = Path(data_dir)
+    today = local_today() if today is None else today
+    now_utc = dt.datetime.now(UTC) if now_utc is None else now_utc
+    gate = run_gate(db)
+    names = route_names(db)
+    days = complete_service_days(db, today)
+    # Read the previous map BEFORE write_manifest overwrites it below.
+    slugs = published_slugs(published_route_ids(db, days),
+                            read_published_slugs(data_dir))
+
+    # Uptime is deliberately exempt from the 14-day baseline gate (spec D6): it
+    # is our own downtime, not a claim about any operator, and the site's
+    # pre-baseline mode depends on it being published from day one.
+    write_uptime_csvs(db, data_dir, uptime_days(db, today))
+
+    daily_dir = data_dir / "daily"
+    if len(days) >= BASELINE_REQUIRED_DAYS:
+        write_daily_csvs(db, data_dir, days, names)
+    elif daily_dir.is_dir():
+        # The baseline gate is a state, not an event: if coverage falls back
+        # below it, previously published route data is WITHDRAWN, not left
+        # standing next to a page saying we publish nothing about any route.
+        shutil.rmtree(daily_dir)
+
+    manifest = build_manifest(db, days, gate, names, slugs, now_utc)
+    write_manifest(data_dir, manifest)
+    return manifest

@@ -1,0 +1,62 @@
+<h1>How these numbers are made</h1>
+<p class="lede">This page is the argument behind every figure on this site. If you think a number here is unfair, this is the page to attack.</p>
+
+<h2>The five outcomes</h2>
+<p>We take the operator's own published timetable, and for every scheduled trip we assign exactly one outcome. There is no “other” bucket, and nothing is quietly dropped.</p>
+<dl class="facts">
+<dt>COMPLETED</dt><dd>A vehicle was seen running this trip, and was still being seen near where the trip was supposed to end.</dd>
+<dt>VANISHED</dt><dd>A vehicle was seen running this trip and then stopped reporting before the trip was over. This is direct evidence of a trip that did not finish as scheduled.</dd>
+<dt>UNTRACKED</dt><dd>No vehicle was ever seen on this trip while we were watching.</dd>
+<dt>CANCELLED</dt><dd>The operator's own real-time feed told us the trip was cancelled. We take their word for it.</dd>
+<dt>EXCLUDED</dt><dd>We were not watching for enough of the trip to judge it. Our problem, not theirs.</dd>
+</dl>
+<p>These add up, always: excluded plus cancelled plus completed plus vanished plus untracked equals the number of scheduled trips, for every route and every day. An automated check enforces that before anything is published, and if it fails we publish nothing at all rather than publish something that does not add up.</p>
+
+<h2>UNTRACKED means we could not see it. It does not mean it did not run.</h2>
+<p>This is the most important sentence on the site.</p>
+<p>A bus with a broken transmitter, a vehicle swapped in at short notice without the right equipment, a gap in the operator's real-time feed, an outage at our end that we failed to detect — every one of those looks exactly like a bus that never came. We cannot tell them apart, and we do not pretend we can. An untracked trip is reported as untracked and as nothing else.</p>
+<p>If you want the number that is direct evidence of a trip failing, that is the vanished rate: a vehicle was there, and then it was not. That is the number we rank on.</p>
+
+<h2>Why there are two rates and never one</h2>
+<p>It would be easy to add the vanished rate and the untracked rate together and call the total “ghost trips”. It would also be dishonest, because it would assert precisely the thing we just said we cannot know. So we never add them. They are computed separately, published in separate columns of the dataset, displayed in separate columns of the table, and no code in this project sums them — there is a test whose only job is to fail if that ever changes.</p>
+<p>The untracked rate is worth showing anyway. It tells you how much of a route's service is invisible to us, which is useful context and is sometimes itself a story about an operator's equipment. But it never moves a route up or down the table, because ranking on it would rank operators by how good their telematics is, not by whether your bus came.</p>
+
+<h2>EXCLUDED is our downtime, and it never counts against the operator</h2>
+<p>When our tracker is down, restarting, or otherwise not watching, we cannot judge the trips that were running at the time. Those trips are marked EXCLUDED and removed from the denominator of both rates. A route is never punished for the minutes we were not looking.</p>
+<p>Our own uptime is published on the front page, from the first day of tracking, precisely so you can see how often that happens and hold us to it.</p>
+
+<h2>How we decide a vehicle finished the trip</h2>
+<p>Nobody tells us a trip completed. We infer it geographically: we watch where the vehicle assigned to a trip reports itself, and if the last position we have for it is within a set distance of where the trip was supposed to end, we call it completed. If we saw the vehicle earlier in the trip but it stopped reporting well short of the end, we call it vanished.</p>
+<p>That method has a known error, and the error runs in one direction only. Matching is generous: a vehicle that stops reporting somewhere that happens to be close to the end of the route can be recorded as completed when it really vanished. But the reverse cannot happen — a vehicle that is genuinely reporting all the way to the end of the route cannot be mistaken for one that disappeared.</p>
+<p>So a generous match can hide a ghost. It can never invent one. Read the vanished rate as a floor: the real figure is at least this high, possibly higher, never lower. Every ambiguity in our method makes the operator look better, not worse.</p>
+
+<h2>Benefit of the doubt</h2>
+<p>Where the geographic test cannot resolve a trip either way, we resolve it in the operator's favour. If we cannot show that a trip failed, we do not say it failed. We would rather understate a problem than manufacture one — a league table of bus routes is an accusation, and an accusation has to clear a higher bar than a hunch.</p>
+
+<h2>Feed staleness: measured, not yet acted on</h2>
+<p>Real-time positions arrive with a timestamp, and that timestamp is sometimes older than the moment we receive it. We record how stale every position was. Today that measurement changes nothing: no trip is classified differently because its data was stale, and no route is penalised for it. Choosing a staleness threshold requires a baseline we do not yet have, and picking a number before we have the evidence would be exactly the kind of guessing this project exists to avoid. When we do set one, it will be written down here, with the reasoning, before it affects a single published figure.</p>
+
+<h2>How to read a confidence interval</h2>
+<p>A route with 30 trips and 2 vanished shows 6.7%. But 30 trips is a small sample. Watch the same route for another month and you might see 1, or 5, without anything about the service having changed. The headline percentage alone invites you to over-read it.</p>
+<p>So every rate we publish carries a 95% confidence interval: the range the true rate plausibly sits in, given how much data we actually have. We use the Wilson score interval rather than the textbook one, because the rates here sit close to zero on small samples, and the textbook formula produces nonsense there — negative lower bounds, and intervals of zero width when nothing has gone wrong yet.</p>
+<p>Two rules for reading them:</p>
+<ul>
+<li>If two routes' intervals <strong>overlap</strong>, the data does not distinguish them, whatever their headline percentages say. Do not read a difference into it.</li>
+<li>A <strong>wide</strong> interval means “we have few trips”, not “this route is wildly unreliable”. Width is about sample size, not about severity.</li>
+</ul>
+
+<h2>Why the table is ordered the way it is</h2>
+<p>We rank by the <strong>lower bound</strong> of the vanished interval, worst first — not by the headline rate. A route is placed above another only where the evidence supports that ordering, so an unlucky handful of trips on a quiet route cannot leap it to the top of the table. The effect is that the table is conservative by construction: to be ranked badly here, a route has to have both a bad rate and enough trips to be sure of it.</p>
+
+<h2>When we stay quiet</h2>
+<ul>
+<li><strong>Fewer than 30 trips we could judge</strong> in the 28-day window: the route is listed under “not enough data yet” with its counts visible, is never ranked, and no headline rate is claimed for it. The count that matters is trips we could actually judge — scheduled trips minus the ones we were not watching — because a route with thirty scheduled trips and twenty-nine we missed has told us almost nothing, and shaming it on the one trip we saw would be indefensible.</li>
+<li><strong>Fewer than 14 complete days</strong> of tracking: no route-level number is published at all, in the dataset or on the site. Only our own uptime, which is a claim about us and not about anyone else.</li>
+<li><strong>Only complete service days count.</strong> Today is never in the table: a partial day understates trip counts and distorts every rate computed from it.</li>
+<li><strong>Missing days are shown as gaps</strong> and never interpolated. If we did not publish a day, you will see a hole, not a guess.</li>
+<li><strong>A rate with no trips behind it shows as “—”</strong>, never as 0.0%. An undefined rate is not a perfect score.</li>
+</ul>
+
+<h2>Check it yourself</h2>
+<p>The site you are reading is built from the published CSV files and nothing else — it has no access to our database, so a number here cannot differ from the number in the data you can download. Take the files, recompute, and tell us if you get something different.</p>
+<p class="note"><a href="about-data.html">Download the data</a> · <a href="index.html">Back to the scoreboard</a></p>

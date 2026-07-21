@@ -1,0 +1,25 @@
+<h1>About the data</h1>
+<p class="lede">Everything on this site is computed from the files linked below. Nothing else feeds the pages you are reading.</p>
+
+<h2>This release</h2>
+<dl class="facts">
+<dt>Schema version</dt><dd>${schema_version}</dd>
+<dt>Generated at</dt><dd>${generated_at}</dd>
+<dt>Timetable hash</dt><dd><code>${timetable_hash}</code></dd>
+<dt>Timetable loaded</dt><dd>${timetable_loaded}</dd>
+<dt>Coverage</dt><dd>${coverage_first} to ${coverage_last} — ${complete_days} complete service days</dd>
+<dt>Real-time snapshots collected</dt><dd>${snapshots}</dd>
+<dt>Vehicle observations recorded</dt><dd>${observations}</dd>
+<dt>Trips classified</dt><dd>${trips_classified}</dd>
+<dt>Routes present in the outcomes but absent from the timetable's route table</dt><dd>${unnamed_routes}</dd>
+</dl>
+<p class="note">Routes missing from the timetable's route table are shown by their raw route id rather than a name. We list them here rather than dropping them, because a route we cannot name is still a route we counted.</p>
+
+<h2>Files</h2>
+<p>Every figure on this site is recomputable from these. The manifest is the machine-readable version of the facts above.</p>
+${csv_links}
+
+<h2>Attribution and licence</h2>
+<p>Timetable data and real-time vehicle positions come from the General Transit Feed Specification feeds published by <strong>Transport for Ireland</strong> / the <strong>National Transport Authority</strong>. Ghost Bus is an independent project and is not affiliated with, endorsed by, or operated by TFI, the NTA, Dublin Bus, Go-Ahead Ireland, or any other operator.</p>
+<p>The classifications, rates and intervals in these files are ours, not theirs. If you use them, say so, and link to the methodology so that whoever reads your work can see what the numbers do and do not claim.</p>
+<p class="note"><a href="methodology.html">Methodology</a> · <a href="index.html">Back to the scoreboard</a></p>

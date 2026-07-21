@@ -35,8 +35,18 @@ neither clearly completed nor clearly vanished (including any trip last
 seen 10-15 minutes before its scheduled end) counts as COMPLETED — benefit
 of the doubt.
 
-**Headline metric:** ghost rate = (UNTRACKED + VANISHED) / (scheduled − EXCLUDED),
-per route, per hour-of-day, per day.
+**Two metrics, never one.** Earlier drafts of this README described a single
+"ghost rate" of `(UNTRACKED + VANISHED) / (scheduled − EXCLUDED)`. That number
+is not published and no code computes it, because it sums two things that mean
+different things: VANISHED is direct evidence a trip stopped mid-route, while
+UNTRACKED means *no vehicle was ever seen* — which is the commuter's ghost but
+is also exactly what a dead telematics unit looks like. Adding them would
+present an unknown as an accusation.
+
+So each route carries a **vanished rate** and an **untracked rate**, reported
+separately, each over the same denominator (scheduled − EXCLUDED) and each with
+its own confidence interval. No code path sums them, and a test exists whose
+only job is to fail if one ever does.
 
 ### Spec amendment G1 (2026-07-19): geographic progress
 
@@ -72,12 +82,14 @@ The scoreboard ships alongside a 30-day tracker-uptime strip, gated by
 `run_checks.py`. Today that gate validates the outcome vocabulary (every
 outcome is one of the five valid classes) and the internal consistency of
 the rollup code path itself — that its own aggregate class counts reconcile
-with the trip-level outcomes that produced them, and that no ghost rate
-falls outside [0, 1]. That is a correctness check on the aggregation logic,
-not yet an independent reconciliation against the raw archived feed
-snapshots; that independent artifact reconciliation lands with the
-publisher (Phase 2). The site never publishes numbers today's gate didn't
-pass.
+with the trip-level outcomes that produced them, and that neither published
+rate falls outside [0, 1]. That is a correctness check on the aggregation
+logic, not an independent reconciliation against the raw archived feed
+snapshots — and it is weaker than it sounds: the count it reconciles against
+is derived from the same rows it is summing, so it confirms the trips we
+classified add up, not that every trip in the operator's timetable was
+classified in the first place. The site never publishes numbers that gate
+didn't pass.
 
 ## Quick start
 

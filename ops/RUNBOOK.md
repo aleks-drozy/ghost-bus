@@ -94,18 +94,34 @@ every configured `credential.helper`'s `store` action afterward. `publish.sh`
 already neutralises this in code (`GIT_CONFIG_NOSYSTEM=1` plus
 `-c credential.helper=` on every network-touching git command), so this is
 belt-and-braces, not the primary defence — and it must inspect the account
-that actually runs `ghostbus-publisher.service`. That unit has no `User=`, so
-it runs as **root**, not `ubuntu`; checking `ubuntu`'s own `--global` config
-(as an earlier version of this note did) inspects an account the publisher
-never runs as, and misses `/etc/gitconfig` (system scope) entirely.
+that actually runs `ghostbus-publisher.service`: **`ubuntu`** (`User=ubuntu`
+in the unit — chosen over the systemd default of root specifically so the
+checkout's owner matches the process's UID and to shrink the blast radius of
+the one credential on this VM that can write to GitHub; see the unit file's
+own comment). Check both the `ubuntu` account and system scope, since either
+could still carry a stale helper from before this was set up:
 
 ```bash
-sudo git config --list --show-origin | grep -i credential   # expect: no output
+git config --global --list --show-origin | grep -i credential   # as ubuntu; expect: no output
+sudo git config --system --list --show-origin | grep -i credential   # expect: no output
 ```
 
-If anything prints, find and unset it in the scope shown (`file:/etc/gitconfig`,
-`file:/root/.gitconfig`, or the data-repo checkout's own `.git/config`) —
-e.g. `sudo git config --system --unset credential.helper` for system scope.
+If anything prints, find and unset it in the scope shown — e.g.
+`git config --global --unset credential.helper` (as `ubuntu`) or
+`sudo git config --system --unset credential.helper`.
+
+### 2.1a Dubious ownership on the publisher's checkouts
+
+**"detected dubious ownership in repository"** from git, immediately after
+install or after any manual `chown`/`chmod` on `/opt/ghost-bus` or
+`/opt/ghost-bus/data-repo`. `User=ubuntu` (above) means this should not occur
+as long as both checkouts stay owned by `ubuntu` — if it does anyway, fix the
+ownership (`sudo chown -R ubuntu:ubuntu /opt/ghost-bus`) rather than adding a
+`safe.directory` exception; the latter is the standard git remedy in general,
+but here it would paper over an ownership mismatch that shouldn't exist in
+the first place, and `GIT_CONFIG_NOSYSTEM=1` in `publish.sh` means a
+`safe.directory` entry in *system* scope wouldn't even be read anyway (it
+would have to go in `ubuntu`'s own `~/.gitconfig`).
 
 ### 2.2 Install the systemd units
 
@@ -247,6 +263,25 @@ find /opt/ghost-bus/state/archive -name '*.pb.zst' -mtime +7 -print -delete
 ```
 
 Drop `-delete` first to dry-run and confirm the file list before deleting.
+
+### 4.4 Publisher refuses every run: stray file in data-repo
+
+`ghostbus-publisher.service` failing every night with `publish: staged files
+outside the dataset contract - refusing to publish` (check
+`journalctl -u ghostbus-publisher.service`). `publish.sh`'s fetch+reset step
+(`git reset --hard`) restores tracked files to match the remote, but does
+**not** remove untracked ones — so a stray untracked file left inside
+`data/daily` or `data/uptime` (a half-written file from an interrupted run,
+manual debugging, or worse) persists across runs and trips the abort gate
+every night, indefinitely. This is the correct, safe behaviour — refusing to
+publish beats guessing — but it needs a human to clear it:
+
+```bash
+cd /opt/ghost-bus/data-repo
+git status --porcelain -- data/daily data/uptime   # find the offending file(s)
+git clean -n -- data/daily data/uptime             # dry run - confirm what would go
+git clean -f -- data/daily data/uptime             # remove it, then re-run the timer
+```
 
 ---
 

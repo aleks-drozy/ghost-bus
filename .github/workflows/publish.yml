@@ -5,18 +5,31 @@ on:
     # Any change that can alter the emitted HTML must redeploy, or the live
     # site keeps serving stale pages until the data happens to move.
     paths: ['publish/**', 'site/**', 'aggregate/**', '.github/workflows/publish.yml']
-  # The dataset lives in aleks-drozy/ghost-bus-data, so a new publish arrives
-  # as a dispatch rather than as a push to this repository.
-  repository_dispatch:
-    types: [dataset-published]
+  # Nothing dispatches a rebuild from ghost-bus-data: the only GitHub API call
+  # that could ("Create a repository dispatch event", POST
+  # /repos/{owner}/{repo}/dispatches) requires a Contents:write token on THIS
+  # repo, per GitHub's own fine-grained-permission table for that endpoint -
+  # exactly the capability spec D4 exists to deny the VM. No credential can
+  # fire that dispatch without reintroducing what the trust split removed, so
+  # this polls on a schedule instead of reacting to one.
+  schedule:
+    # The VM publishes at 03:30 Europe/Dublin (ops/ghostbus-publisher.timer).
+    # Cron is always UTC, and Dublin alternates between GMT (UTC+0) and IST
+    # (UTC+1), so 03:30 local falls between 02:30 UTC (summer) and 03:30 UTC
+    # (winter). 04:37 UTC keeps a margin of at least 67 minutes over both.
+    # :37 rather than :00/:30 because GitHub Actions delays and drops
+    # scheduled runs that all land on the same popular minute mark.
+    #
+    # Failure mode this cannot self-detect: GitHub auto-disables scheduled
+    # workflows in a public repo after 60 days with no commit activity IN
+    # THIS repo - and this repo's nightly activity happens in
+    # ghost-bus-data, not here. When that fires, no run occurs, so no run
+    # fails, so nothing here alerts, and the site silently stops updating.
+    # Watching `generated_at` on the deployed about-data page (or an
+    # external staleness check) is the honest mitigation; this workflow has
+    # no way to notice that it itself has stopped running.
+    - cron: '37 4 * * *'
   workflow_dispatch:
-
-# Least privilege: the workflow reads the repos and writes only a Pages
-# deployment. It never writes repo contents - the VM owns the dataset.
-permissions:
-  contents: read
-  pages: write
-  id-token: write
 
 # One Pages deployment at a time; never cancel one mid-flight, because a
 # cancelled deploy can leave the site on a half-uploaded artifact.
@@ -27,11 +40,19 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Least privilege, scoped per job rather than for the whole workflow: this
+    # job runs the full test suite and the site builder against
+    # untrusted-shaped input (the published dataset), so it must not also
+    # hold the OIDC-minting permission `deploy` needs below - a compromise
+    # here should not be able to mint a Pages deployment token.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v5
       # The published dataset, checked out alongside the code. It contains only
       # CSVs and a manifest, so nothing here is executable.
-      - uses: actions/checkout@v5
+      - name: Check out published dataset (aleks-drozy/ghost-bus-data)
+        uses: actions/checkout@v5
         with:
           repository: aleks-drozy/ghost-bus-data
           path: data
@@ -41,7 +62,8 @@ jobs:
       # Gate: the full suite must pass before anything is rendered.
       - run: python -m pytest
       # D3: the site is built from the published CSVs, never from the database.
-      - run: python -m publish.site --data data/data --out _site
+      - name: Build the site from the published CSVs
+        run: python -m publish.site --data data/data --out _site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with: {path: _site}
@@ -49,6 +71,11 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # Only this job mints the OIDC token and writes the Pages deployment;
+    # `build` above never holds either permission.
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

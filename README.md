@@ -156,8 +156,67 @@ ghost-bus/
 ├── aggregate/         # trip outcomes -> route/hour/day rollups
 ├── ops/               # systemd units, RUNBOOK
 ├── tests/             # pytest, no network; synthetic "Fixtureville" GTFS
+├── publish/           # dataset publisher (VM) and site builder (CI)
+├── site/              # HTML templates and the one stylesheet
 └── run_checks.py      # the publish gate
 ```
+
+## The scoreboard & open data
+
+**Nothing here is live yet.** GitHub Pages is not enabled on this repo and
+the `ghost-bus-data` repository does not exist. What follows is what this
+pipeline will publish, and under what conditions — not a description of a
+site you can visit today. `ops/RUNBOOK.md` §8 is the one-time setup
+(create the data repo, enable Pages, mint a scoped token) that turns it on.
+
+Once enabled, the scoreboard will be built in CI *from the published CSVs*,
+never from the database, so a number on the page could not disagree with
+the downloadable data — there would be only one source for both. The
+dataset will live in its own repository, written by a credential that can
+reach nothing else, so the machine that produces the numbers cannot also
+produce the page.
+
+**Site (once enabled):** https://aleks-drozy.github.io/ghost-bus/
+**Data (once created):** https://github.com/aleks-drozy/ghost-bus-data
+
+| Path in the data repo | What it will hold |
+|---|---|
+| `data/daily/` | One CSV per complete service day: per-route counts of every outcome, plus both rates with a Wilson confidence interval |
+| `data/uptime/` | One CSV per day of the tracker's own uptime — the downtime that excludes trips from operator stats |
+| `data/manifest.json` | Coverage dates, timetable hash and load date, gate results, schema version, and any route ids we could not name |
+
+What the site will and will not say:
+
+- **Two rates, never summed.** VANISHED (a bus was tracked, then
+  disappeared mid-route) and UNTRACKED (never seen at all) will be
+  published as separate columns. Summing them would assert that every
+  untracked trip failed to run, and we cannot know that — a dead
+  telematics unit looks identical to a bus that never left the depot.
+- **Ranked by the bottom of the confidence interval, not the headline
+  rate.** A route will be placed above another only where the sample
+  supports the ordering. Ranking uses the vanished rate only; the
+  untracked rate never affects position, because ranking on it would rank
+  operators by how well their tracking hardware works.
+- **Routes with fewer than 30 trips we could judge, in a rolling 28-day
+  window, will be listed but never ranked, and no headline rate will be
+  claimed for them.** The count that matters is trips we were actually
+  watching — scheduled minus excluded — so a route we mostly missed cannot
+  be shamed on the handful we saw.
+- **Nothing route-level publishes until 14 complete service days exist.**
+  Until then the site will show the methodology, the tracker's own
+  uptime, and how far into the baseline collection we are. Uptime is exempt
+  from that gate and publishes from day one — it is our own failure rate,
+  not an accusation about anyone else. If coverage ever falls back below
+  the threshold, the route data is withdrawn again.
+- **Only complete service days count.** A day in progress understates
+  trips and distorts every rate computed from it, so today is never
+  published.
+- **Gaps are shown as gaps.** A day with no data is never interpolated,
+  and a rate with no trips behind it renders as "—", never as zero.
+
+The site will be plain HTML and one stylesheet: no JavaScript, no
+analytics, no cookies, no fonts or assets from anywhere else — no
+third-party requests at all.
 
 ## Docs
 
@@ -176,3 +235,8 @@ National Transport Authority, used under its developer terms with
 attribution. Static timetables come from the "Operator GTFS Schedule
 files" on data.gov.ie; real-time data comes from the NTA's GTFS-Realtime
 developer API (`TripUpdates` and `VehiclePositions`).
+
+Once published, the dataset in `aleks-drozy/ghost-bus-data` will carry the
+same attribution: the classifications, rates and intervals in those files
+will be ours, not the NTA's. If you use them, link to the methodology so
+whoever reads your work can see what the numbers do and do not claim.

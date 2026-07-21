@@ -25,6 +25,9 @@ RATE_FIELDS = (
     "untracked_rate", "untracked_lo", "untracked_hi",
 )
 
+WINDOW_DAYS = 28
+MIN_TRIPS = 30
+
 SITE_DIR = Path(__file__).resolve().parent.parent / "site"
 EM_DASH = "—"
 EN_DASH = "–"
@@ -190,3 +193,74 @@ def read_uptime(data_dir) -> list[dict]:
                 )
                 rows.append(row)
     return rows
+
+
+def window_dates(rows: list[dict], window: int = WINDOW_DAYS) -> list[str]:
+    """The last `window` distinct complete service dates present in the data."""
+    return sorted({row["service_date"] for row in rows})[-window:]
+
+
+def aggregate_window(rows: list[dict], window: int = WINDOW_DAYS) -> list[dict]:
+    """Sum per-route counts over the window and recompute both rates on the sum.
+
+    The two rates share a denominator (scheduled - excluded, matching
+    aggregate/rollup.py) and are computed independently. They are never added.
+    """
+    wanted = set(window_dates(rows, window))
+    by_route: dict[str, dict] = {}
+    for row in rows:
+        if row["service_date"] not in wanted:
+            continue
+        entry = by_route.get(row["route_id"])
+        if entry is None:
+            entry = {
+                "route_id": row["route_id"],
+                "route_short_name": row.get("route_short_name") or "",
+                "route_long_name": row.get("route_long_name") or "",
+                "agency_name": row.get("agency_name") or "",
+                "days": 0,
+            }
+            entry.update({field: 0 for field in COUNT_FIELDS})
+            by_route[row["route_id"]] = entry
+        entry["days"] += 1
+        for field in COUNT_FIELDS:
+            entry[field] += row[field]
+        for name in ("route_short_name", "route_long_name", "agency_name"):
+            if not entry[name] and row.get(name):
+                entry[name] = row[name]
+
+    out = []
+    for entry in by_route.values():
+        trials = entry["scheduled"] - entry["excluded"]
+        entry["trials"] = trials
+        entry["vanished_interval"] = rate_with_interval(entry["vanished"], trials)
+        entry["untracked_interval"] = rate_with_interval(entry["untracked"], trials)
+        out.append(entry)
+    return sorted(out, key=lambda e: e["route_id"])
+
+
+def leaderboard(rows: list[dict], window: int = WINDOW_DAYS,
+                min_trips: int = MIN_TRIPS) -> tuple[list[dict], list[dict]]:
+    """Return (ranked, unranked).
+
+    Ranking requires >= min_trips JUDGEABLE trips in the window (D6): trials,
+    i.e. scheduled minus excluded, which is the denominator of both rates and
+    the number the board shows. Gating on `scheduled` would let a route with
+    30 scheduled and 29 excluded be ranked on one observation.
+
+    Ranked order is the Wilson LOWER bound of the VANISHED rate, descending,
+    worst first (D2). The point estimate is only a tiebreak below it, and the
+    untracked rate has no influence on position at all.
+    """
+    ranked, unranked = [], []
+    for entry in aggregate_window(rows, window):
+        # trials >= 30 already implies a defined interval; the second clause is
+        # belt and braces, not a second policy.
+        if entry["trials"] >= min_trips and entry["vanished_interval"] is not None:
+            ranked.append(entry)
+        else:
+            unranked.append(entry)
+    ranked.sort(key=lambda e: (-e["vanished_interval"][1],
+                               -e["vanished_interval"][0], e["route_id"]))
+    unranked.sort(key=lambda e: (-e["trials"], e["route_id"]))
+    return ranked, unranked

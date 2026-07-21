@@ -59,9 +59,18 @@ def test_publish_script_is_strict_and_never_traces(publish):
     assert "set +x" in publish
 
 
-def test_publish_script_never_names_the_token(publish):
-    """Only the askpass helper reads the token."""
-    assert TOKEN_VAR not in publish
+def test_publish_script_never_reads_the_token(publish):
+    """publish.sh may NAME the token - it strips it from publish.dataset's
+    environment via `env -u GHOSTBUS_PUBLISH_TOKEN` (I5: that component is
+    deliberately kept git-free, but nothing stops it reading os.environ, and
+    it writes into the directory that gets published) - but must never READ
+    its value. Only the askpass helper does that. An earlier version of this
+    test required the token's name to be wholly absent, which `env -u` (a
+    security improvement, not a leak) directly contradicts; the actual
+    property is "never expanded", not "never mentioned".
+    """
+    assert "${GHOSTBUS_PUBLISH_TOKEN}" not in publish
+    assert "env -u GHOSTBUS_PUBLISH_TOKEN" in publish
 
 
 def test_publish_script_disables_git_tracing(publish):
@@ -87,6 +96,36 @@ def test_dataset_is_pushed_to_its_own_repository(publish):
 def test_push_url_carries_no_credential(publish):
     assert "https://x-access-token@github.com/aleks-drozy/ghost-bus-data.git" in publish
     assert "x-access-token:" not in publish, "no token may be embedded in the URL"
+
+
+def test_network_git_commands_disable_credential_helper_persistence(publish):
+    """C2: GIT_ASKPASS only answers git's password prompt for this
+    invocation - it does not stop git from also handing a successful
+    credential to every configured credential.helper's `store` action
+    afterward (credential_approve() runs regardless of where the credential
+    came from). The unit has no User=, so this runs as root; a
+    credential.helper configured in /etc/gitconfig or root's own
+    ~/.gitconfig would otherwise write the token in plaintext to
+    /root/.git-credentials on the first successful push. GIT_CONFIG_NOSYSTEM
+    removes /etc/gitconfig from consideration entirely; `-c credential.helper=`
+    (empty resets the helper list) is applied directly to fetch and push.
+    """
+    assert "GIT_CONFIG_NOSYSTEM=1" in publish
+    assert publish.count("-c credential.helper=") >= 2
+
+
+def test_establishes_a_known_base_before_pushing(publish):
+    """C1: `git push HEAD:main` pushes HEAD and every ancestor not already on
+    the remote. Without fetching and resetting to the remote's actual tip
+    first, anything ever committed locally in the data checkout - a person
+    debugging, or an attacker with write access there - rides out on the
+    next successful publish unexamined. See
+    test_unrelated_local_commit_never_reaches_the_remote for the behavioural
+    proof.
+    """
+    assert "git -c credential.helper= fetch" in publish
+    assert "git reset --hard FETCH_HEAD" in publish
+    assert "git rev-list --count" in publish
 
 
 def test_uses_the_dataset_cli_flags_that_exist(publish):
@@ -189,13 +228,19 @@ def _git(cwd: Path, *args: str) -> None:
                     capture_output=True, text=True)
 
 
-# Stand-in for `publish.dataset`: reacts to two env knobs so tests control
-# gate success/failure and the stray-file scenario without touching the real
-# dataset builder (Task 9, out of scope here).
+# Stand-in for `publish.dataset`: reacts to env knobs so tests control gate
+# success/failure, the stray-file scenario, the pre-baseline shape, and
+# dataset content across repeated runs, without touching the real dataset
+# builder (Task 9, out of scope here). Also doubles as the I5 regression
+# sentinel: if the token is still in this process's environment, publish.sh
+# failed to strip it, and the stub exits 42 rather than pretending to work.
 _PY_STUB = '''#!/usr/bin/env python
 import os
 import sys
 import pathlib
+
+if "GHOSTBUS_PUBLISH_TOKEN" in os.environ:
+    sys.exit(42)
 
 args = sys.argv[1:]
 data_dir = None
@@ -207,12 +252,16 @@ exit_code = int(os.environ.get("STUB_DATASET_EXIT", "0"))
 if exit_code != 0:
     sys.exit(exit_code)
 
+date = os.environ.get("STUB_DATE", "2026-07-20")
 d = pathlib.Path(data_dir)
-(d / "daily").mkdir(parents=True, exist_ok=True)
+
+if not os.environ.get("STUB_SKIP_DAILY"):
+    (d / "daily").mkdir(parents=True, exist_ok=True)
+    (d / "daily" / (date + ".csv")).write_text("route,otp\\n1,0.9\\n")
+
 (d / "uptime").mkdir(parents=True, exist_ok=True)
-(d / "daily" / "2026-07-20.csv").write_text("route,otp\\n1,0.9\\n")
-(d / "uptime" / "2026-07-20.csv").write_text("date,uptime\\n2026-07-20,1.0\\n")
-(d / "manifest.json").write_text("{\\"generated\\": \\"2026-07-20\\"}")
+(d / "uptime" / (date + ".csv")).write_text("date,uptime\\n" + date + ",1.0\\n")
+(d / "manifest.json").write_text('{"generated": "' + date + '"}')
 
 if os.environ.get("STUB_WRITE_STRAY"):
     (d / "daily" / "rogue.txt").write_text("not part of the dataset contract")
@@ -227,11 +276,20 @@ class Sandbox:
     aleks-drozy/ghost-bus-data. `run()` executes the real ops/publish.sh
     against them via GHOSTBUS_REPO_DIR / GHOSTBUS_DATA_REPO_DIR /
     GHOSTBUS_DATA_REMOTE.
+
+    `nested_data_repo=True` exercises the actual production default instead
+    of overriding every knob (I6): DATA_REPO is left to resolve as
+    `${REPO_DIR}/data-repo` (I1's chosen fix - gitignored, like .venv/ -
+    rather than a sibling path, precisely so this default stays derived from
+    REPO_DIR and testable at all).
     """
 
-    def __init__(self, tmp_path: Path):
+    def __init__(self, tmp_path: Path, nested_data_repo: bool = False):
         self.repo_dir = tmp_path / "opt-ghost-bus"
-        self.data_repo = tmp_path / "data-repo"
+        self.nested_data_repo = nested_data_repo
+        self.data_repo = (
+            (self.repo_dir / "data-repo") if nested_data_repo else (tmp_path / "data-repo")
+        )
         self.remote = tmp_path / "remote.git"
 
         (self.repo_dir / ".venv" / "bin").mkdir(parents=True)
@@ -242,10 +300,19 @@ class Sandbox:
         _git(tmp_path, "init", "-q", str(self.repo_dir))
         _git(self.repo_dir, "config", "user.email", "codeowner@example.invalid")
         _git(self.repo_dir, "config", "user.name", "codeowner")
-        (self.repo_dir / "README.md").write_text("stand-in code checkout\n")
-        # The real deploy has .venv outside version control; match that so
-        # the stub interpreter doesn't itself trip the dirty-checkout guard.
-        (self.repo_dir / ".gitignore").write_text(".venv/\n")
+        # newline="\n": GIT_CONFIG_NOSYSTEM=1 (exported by publish.sh, see
+        # C2) means publish.sh's OWN `git status` does not apply this
+        # machine's system-scope core.autocrlf - so if these were written
+        # with platform-default (CRLF-on-Windows) newlines while the initial
+        # commit below (a plain `git` call, still subject to autocrlf) stored
+        # them LF-normalized, publish.sh's dirty-checkout guard would find a
+        # spurious byte-level difference and refuse every run. Match the
+        # real Linux deploy target, which has no such mismatch to begin with.
+        (self.repo_dir / "README.md").write_text("stand-in code checkout\n", newline="\n")
+        # The real deploy has .venv (and, nested, data-repo) outside version
+        # control; match that so neither trips the dirty-checkout guard.
+        ignored = [".venv/"] + (["data-repo/"] if nested_data_repo else [])
+        (self.repo_dir / ".gitignore").write_text("\n".join(ignored) + "\n", newline="\n")
         _git(self.repo_dir, "add", "README.md", ".gitignore")
         _git(self.repo_dir, "commit", "-q", "-m", "initial")
 
@@ -258,7 +325,8 @@ class Sandbox:
             [os.path.dirname(sys.executable), env.get("PATH", "")]
         )
         env["GHOSTBUS_REPO_DIR"] = _posix(self.repo_dir)
-        env["GHOSTBUS_DATA_REPO_DIR"] = _posix(self.data_repo)
+        if not self.nested_data_repo:
+            env["GHOSTBUS_DATA_REPO_DIR"] = _posix(self.data_repo)
         env["GHOSTBUS_DATA_REMOTE"] = _posix(self.remote)
         if env_overrides:
             env.update(env_overrides)
@@ -275,13 +343,24 @@ class Sandbox:
         )
         return int(result.stdout.strip() or "0")
 
-    def remote_files(self) -> set:
+    def remote_files(self, ref: str = "main") -> set:
         # The bare remote's own HEAD symref is whatever init.defaultBranch
         # left it as (often "master"), regardless of which branch was
         # pushed - so name the pushed branch explicitly rather than HEAD.
         result = subprocess.run(
             ["git", "--git-dir", str(self.remote), "show", "--stat",
-             "--name-only", "--pretty=format:", "main"],
+             "--name-only", "--pretty=format:", ref],
+            capture_output=True, text=True,
+        )
+        return {line for line in result.stdout.split() if line}
+
+    def remote_all_history_files(self) -> set:
+        """Every path that has ever appeared in any commit ever pushed - to
+        prove a file never rode along on ANY push, not just the latest.
+        """
+        result = subprocess.run(
+            ["git", "--git-dir", str(self.remote), "log", "--all",
+             "--name-only", "--pretty=format:"],
             capture_output=True, text=True,
         )
         return {line for line in result.stdout.split() if line}
@@ -331,6 +410,171 @@ def test_stray_file_in_dataset_aborts_the_publish(sandbox):
         cwd=str(sandbox.data_repo), capture_output=True, text=True,
     ).stdout.strip()
     assert staged == ""
+
+
+def test_dataset_builder_never_sees_the_publish_token(sandbox):
+    """I5: publish.dataset is deliberately kept git-free and AST-pinned
+    against spawning a process, but nothing stops it reading os.environ, and
+    it writes into the directory that gets published - a single os.environ
+    dump into the manifest would publish the token. The stub exits 42 if it
+    still sees the token, so a returncode of 0 here (not 42) is the proof
+    publish.sh stripped it via `env -u` before this invocation.
+    """
+    result = sandbox.run(env_overrides={"GHOSTBUS_PUBLISH_TOKEN": "shhh-do-not-leak"})
+    assert result.returncode == 0, result.stderr
+
+
+def test_pre_baseline_shape_publishes_uptime_and_manifest_only(sandbox):
+    """I2: for the first ~14 complete service days, publish.dataset writes
+    no data/daily at all (the baseline gate isn't met), but spec D6 keeps
+    uptime + manifest exempt so they publish from day one. `git add` is
+    fatal on an unmatched pathspec, so the original explicit three-path add
+    died at exit 128 every night until baseline - reproduced directly:
+    `git add -- data/daily data/uptime data/manifest.json` in a directory
+    where only data/uptime and data/manifest.json exist fails with
+    "fatal: pathspec 'data/daily' did not match any files". Assert the
+    tolerant staging still succeeds and pushes exactly what exists.
+    """
+    result = sandbox.run(env_overrides={"STUB_SKIP_DAILY": "1"})
+    assert result.returncode == 0, result.stderr
+    assert sandbox.remote_commit_count() == 1
+    assert sandbox.remote_files() == {"data/uptime/2026-07-20.csv", "data/manifest.json"}
+
+
+def test_gitignore_excludes_the_nested_data_repo_checkout():
+    """I1: DATA_REPO defaults to `${REPO_DIR}/data-repo`, inside the very
+    checkout the dirty-checkout guard inspects. Without this entry,
+    `git status --porcelain` reports `?? data-repo/` and the guard fires on
+    EVERY run - reproduced exactly that way by the reviewer. This is the
+    actual production fix; the Sandbox harness in this file builds its own
+    synthetic .gitignore regardless (see test_default_data_repo_path_
+    resolution below), so only a direct read of the real file catches this
+    entry going missing.
+    """
+    gitignore = (REPO / ".gitignore").read_text(encoding="utf-8")
+    assert "data-repo/" in gitignore.splitlines()
+
+
+def test_default_data_repo_path_resolution(tmp_path):
+    """I6: exercise the production default path resolution (DATA_REPO
+    derived from REPO_DIR as `${REPO_DIR}/data-repo`) instead of always
+    overriding GHOSTBUS_DATA_REPO_DIR - which is exactly how I1 (the guard
+    firing on every run because data-repo/ was untracked) passed a green
+    suite the first time around. This Sandbox always gitignores data-repo/
+    in its own synthetic checkout regardless of the real .gitignore; see
+    test_gitignore_excludes_the_nested_data_repo_checkout for that half.
+    """
+    sandbox = Sandbox(tmp_path, nested_data_repo=True)
+    result = sandbox.run()
+    assert result.returncode == 0, result.stderr
+    assert "code checkout is dirty" not in result.stderr
+    assert sandbox.remote_commit_count() == 1
+    assert sandbox.remote_files() == {
+        "data/daily/2026-07-20.csv",
+        "data/uptime/2026-07-20.csv",
+        "data/manifest.json",
+    }
+
+
+def test_unrelated_local_commit_never_reaches_the_remote(sandbox):
+    """C1: `git push HEAD:main` publishes HEAD and every ancestor not
+    already on the remote. Establish a real remote base (a prior legitimate
+    publish), commit an unrelated file locally on top of it - a person
+    debugging, or an attacker with write access to data-repo - and confirm
+    publish.sh's fetch+reset-to-remote step discards that commit before
+    staging anything, so only the new dataset commit is ever pushed.
+    """
+    first = sandbox.run(env_overrides={"STUB_DATE": "2026-07-20"})
+    assert first.returncode == 0, first.stderr
+    assert sandbox.remote_commit_count() == 1
+
+    (sandbox.data_repo / "evil.html").write_text("<script>pwned</script>")
+    _git(sandbox.data_repo, "add", "evil.html")
+    _git(sandbox.data_repo, "commit", "-q", "-m", "debugging, definitely not malicious")
+
+    second = sandbox.run(env_overrides={"STUB_DATE": "2026-07-21"})
+    assert second.returncode == 0, second.stderr
+    assert sandbox.remote_commit_count() == 2
+    assert sandbox.remote_files() == {
+        "data/daily/2026-07-21.csv",
+        "data/uptime/2026-07-21.csv",
+        "data/manifest.json",
+    }
+    assert "evil.html" not in sandbox.remote_all_history_files()
+
+
+def test_untracked_file_elsewhere_in_the_data_checkout_is_never_staged(sandbox):
+    """I6: the stray-file abort gate (test_stray_file_in_dataset_aborts_the_
+    publish) only covers a file inside data/daily. A file elsewhere in the
+    data checkout - never named by the tolerant `git add` loop at all - must
+    equally never be staged or pushed, without needing the abort gate to
+    catch it.
+    """
+    (sandbox.data_repo / "rogue-root-file.txt").write_text("not part of the dataset")
+    result = sandbox.run()
+    assert result.returncode == 0, result.stderr
+    assert "rogue-root-file.txt" not in sandbox.remote_files()
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(sandbox.data_repo), capture_output=True, text=True,
+    ).stdout
+    assert "rogue-root-file.txt" in status, "should still be untracked, not staged"
+
+
+def test_dirty_guard_fails_closed_when_git_status_itself_fails(sandbox):
+    """I3: `if [ -n "$(git status --porcelain)" ]` swallows a FAILING git
+    status - `set -e` is suppressed inside a condition, and the
+    substitution's own exit status is discarded there regardless - so a
+    failure looked "clean" and let a run straight past the guard. Reproduced
+    by deleting REPO_DIR's own `.git` so `git status` itself errors, while
+    leaving DATA_REPO and the remote fully valid - so if the guard fails
+    open, nothing else stops a complete, successful publish. Real triggers
+    in production: the checkout chowned to `ubuntu` while the unit runs as
+    root (git's "dubious ownership" check), a stale index.lock, or git
+    missing from root's PATH.
+    """
+    def _force_remove(func, path, exc_info):
+        # Git marks object files read-only on Windows; retry after clearing it.
+        os.chmod(path, 0o700)
+        func(path)
+
+    shutil.rmtree(sandbox.repo_dir / ".git", onerror=_force_remove)
+
+    result = sandbox.run()
+
+    assert result.returncode != 0
+    # Dies at `git status` itself (set -e), not our own dirty-checkout
+    # message - proving the failure is caught, not coincidentally masked by
+    # something failing further down the script.
+    assert "code checkout is dirty" not in result.stderr
+    assert "not a git repository" in result.stderr
+    # The property that actually matters: with a valid DATA_REPO and remote
+    # sitting right there, a fail-open guard would let a complete, genuine
+    # publish through. It must not.
+    assert sandbox.remote_commit_count() == 0
+
+
+def test_askpass_refuses_hosts_other_than_github():
+    """M1: even if GHOSTBUS_DATA_REMOTE is ever repointed at a non-GitHub
+    host (misconfiguration, or an attacker who can only change env vars and
+    not this file), the token must stay unusable there.
+    """
+    env = os.environ.copy()
+    env["GHOSTBUS_PUBLISH_TOKEN"] = "shhh"
+
+    ok = subprocess.run(
+        [_find_bash(), _posix(ASKPASS_SH), "Password for 'https://x-access-token@github.com': "],
+        env=env, capture_output=True, text=True,
+    )
+    assert ok.returncode == 0
+    assert ok.stdout == "shhh"
+
+    bad = subprocess.run(
+        [_find_bash(), _posix(ASKPASS_SH), "Password for 'https://evil.example.com': "],
+        env=env, capture_output=True, text=True,
+    )
+    assert bad.returncode != 0
+    assert bad.stdout == ""
 
 
 def test_ops_files_use_unix_line_endings():

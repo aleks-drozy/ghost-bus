@@ -561,3 +561,74 @@ def render_route(site_dir, manifest: dict, entry: dict, daily_rows: list[dict],
         generated_at=manifest.get("generated_at", ""),
         content=content,
     )
+
+
+def render_methodology(site_dir, manifest: dict) -> str:
+    content = load_template("methodology.html.tmpl", site_dir).substitute()
+    return render_page(
+        site_dir,
+        title="Methodology",
+        root="",
+        current="methodology.html",
+        generated_at=manifest.get("generated_at", ""),
+        content=content,
+    )
+
+
+def _csv_links(data_dir) -> str:
+    data_dir = Path(data_dir)
+    parts = ['<ul class="files">']
+    parts.append('<li><a href="data/manifest.json">manifest.json</a> — this release, machine readable</li>')
+    for label, sub in (("Daily route outcomes", "daily"), ("Tracker uptime", "uptime")):
+        directory = data_dir / sub
+        files = sorted(directory.glob("*.csv")) if directory.is_dir() else []
+        if not files:
+            parts.append(f"<li>{esc(label)}: none published yet</li>")
+            continue
+        parts.append(f"<li>{esc(label)}:<ul>")
+        for path in files:
+            href = f"data/{sub}/{path.name}"
+            parts.append(f'<li><a href="{esc(href)}">{esc(path.name)}</a></li>')
+        parts.append("</ul></li>")
+    parts.append("</ul>")
+    return "\n".join(parts)
+
+
+def render_about_data(site_dir, manifest: dict, data_dir) -> str:
+    coverage = manifest.get("coverage") or {}
+    counts = manifest.get("counts") or {}
+    unnamed = manifest.get("unnamed_routes") or []
+    unnamed_html = (
+        "None"
+        if not unnamed
+        else ", ".join(f"<code>{esc(route_id)}</code>" for route_id in unnamed)
+    )
+
+    def shown(value) -> str:
+        # `or EM_DASH`, not a .get default: the manifest publishes JSON nulls
+        # for an empty database, and an absent value must read as explicitly
+        # unknown rather than as a blank gap in a sentence.
+        return esc(value) if value else EM_DASH
+
+    content = load_template("about-data.html.tmpl", site_dir).substitute(
+        schema_version=esc(manifest.get("schema_version", "")),
+        generated_at=esc(manifest.get("generated_at", "")),
+        timetable_hash=esc(manifest.get("timetable_hash", "")),
+        timetable_loaded=shown(manifest.get("timetable_loaded_at")),
+        coverage_first=shown(coverage.get("first_day")),
+        coverage_last=shown(coverage.get("last_day")),
+        complete_days=esc(coverage.get("complete_days", 0)),
+        snapshots=esc(counts.get("snapshots", 0)),
+        observations=esc(counts.get("observations", 0)),
+        trips_classified=esc(counts.get("trips_classified", 0)),
+        unnamed_routes=unnamed_html,
+        csv_links=_csv_links(data_dir),
+    )
+    return render_page(
+        site_dir,
+        title="About the data",
+        root="",
+        current="about-data.html",
+        generated_at=manifest.get("generated_at", ""),
+        content=content,
+    )

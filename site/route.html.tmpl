@@ -1,0 +1,16 @@
+<h1>Route ${route_name}</h1>
+<p class="lede">${route_long}</p>
+<p class="meta">Route id <code>${route_id}</code> · ${agency} · ${rank_line}</p>
+<h2>${window_heading}</h2>
+<dl class="facts">
+<dt>Trips judged</dt><dd>${trials} of ${scheduled} scheduled (${excluded} excluded because we were not watching)</dd>
+<dt>Vanished — a vehicle was seen and then stopped reporting mid-route</dt><dd>${vanished_count} trips, ${vanished_rate} (95% interval ${vanished_interval})</dd>
+<dt>Untracked — no vehicle was ever seen, which is not the same as “did not run”</dt><dd>${untracked_count} trips, ${untracked_rate} (95% interval ${untracked_interval})</dd>
+<dt>Cancelled by the operator</dt><dd>${cancelled} trips</dd>
+<dt>Completed</dt><dd>${completed} trips</dd>
+</dl>
+<p class="note">The two rates are reported separately and are never added together. <a href="../methodology.html">Why that matters</a>.</p>
+<h2>Day by day</h2>
+<p class="note">Counts only: one service day is far too small a sample to put a percentage on, and a day we published nothing for is shown as a gap and never filled in from the days either side of it.</p>
+${daily_table}
+<p class="note"><a href="../index.html">Back to the scoreboard</a> · <a href="../methodology.html">Methodology</a> · <a href="../about-data.html">Download the data</a></p>

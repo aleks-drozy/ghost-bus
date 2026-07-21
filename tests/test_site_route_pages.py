@@ -1,3 +1,5 @@
+import datetime as dt
+
 from tests.site_fixtures import DEFAULT_MANIFEST, daily_row
 
 from publish.site import SITE_DIR, leaderboard, render_route
@@ -104,3 +106,67 @@ def test_route_page_links_back_with_relative_paths():
     assert 'href="../index.html"' in html
     assert 'href="../methodology.html"' in html
     assert 'href="../style.css"' in html
+
+
+def _gapped_days_and_counts():
+    """28 service days scattered across a 40-calendar-day span.
+
+    05-01..05-14 (14 days) then a 12-day publisher gap (05-15..05-26) then
+    05-27..06-09 (14 days) = 28 service days total, but the first and last
+    of them are 40 calendar days apart. A count-only heading ("Last 28
+    complete service days") is true and misleading at once: it reads like
+    "the last month or so" when the evidence actually reaches back further.
+    """
+    start = dt.date(2026, 5, 1)
+    gap_start = dt.date(2026, 5, 15)
+    gap_end = dt.date(2026, 5, 26)
+    end = dt.date(2026, 6, 9)
+    days = []
+    day = start
+    while day <= end:
+        if day < gap_start or day > gap_end:
+            days.append(day.isoformat())
+        day += dt.timedelta(days=1)
+    assert len(days) == 28
+    assert days[0] == "2026-05-01"
+    assert days[-1] == "2026-06-09"
+    return [(d, 40, 2, 0) for d in days]
+
+
+def test_window_heading_states_the_true_span_across_a_gapped_window():
+    """The whole point of this test: count alone would pass either way.
+
+    A contiguous 28-day window would make 'Last 28 complete service days'
+    and 'spans 2026-05-01 to 2026-06-09' equivalent claims. Only a gapped
+    window - where 28 service days stretch across 40 calendar days -
+    distinguishes 'states the count' from 'states the count AND the true
+    span', which is the honesty this change is for.
+    """
+    rows = rows_for("R1", _gapped_days_and_counts())
+    html = page_for(rows, "R1")
+    assert "Last 28 complete service days, 2026-05-01 to 2026-06-09" in html
+
+
+def test_window_heading_states_a_single_day_without_a_bogus_span():
+    rows = rows_for("R1", [("2026-06-28", 40, 2, 0)])
+    html = page_for(rows, "R1")
+    assert "Last 1 complete service day, 2026-06-28" in html
+    # Not "2026-06-28 to 2026-06-28" - a single day has no span to state.
+    assert "2026-06-28 to 2026-06-28" not in html
+
+
+def test_window_heading_states_zero_days_sensibly_when_daily_rows_is_empty():
+    """The pre-baseline / defensive path: no complete service days at all.
+
+    Reachable in practice only if render_route is ever called with a window
+    that carries no rows for any route (daily_rows empty). Guards against
+    a grammatically odd 'Last 0 complete service days, no complete days yet'.
+    """
+    rows = rows_for("R1", [("2026-06-28", 40, 2, 0)])
+    ranked, unranked = leaderboard(rows)
+    entries = ranked + unranked
+    slugs = slug_map(e["route_id"] for e in entries)
+    entry = next(e for e in entries if e["route_id"] == "R1")
+    html = render_route(SITE_DIR, DEFAULT_MANIFEST, entry, [], slugs, position=1)
+    assert "No complete service days published yet" in html
+    assert "Last 0" not in html

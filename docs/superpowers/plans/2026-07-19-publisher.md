@@ -15,7 +15,7 @@
 - **D3 — the site is built from the published dataset, never from the database.** The VM publishes CSVs; GitHub Actions builds HTML *from those CSVs*.
 - **D4 — split trust: the VM publishes data, CI publishes the site.** The VM's credential cannot publish arbitrary HTML.
 - **D5 — stdlib templating, escaping test-pinned.** `string.Template` plus explicit `html.escape()`. Route names come from GTFS — external input — so escaping is a security requirement, not a nicety.
-- **D6 — two publication gates, enforced in code.** `>=30` trips in the window before a route is ranked; `>=14` complete service days before *any* route-level number is published, in the dataset or on the site. Below-threshold routes still appear, under "not enough data yet", with their counts visible.
+- **D6 — two publication gates, enforced in code.** `>=30` **judgeable trips (`scheduled − excluded`)** in the window before a route is ranked — the same denominator as the rates the gate guards, never `scheduled`; `>=14` complete service days before *any* route-level number is published, in the dataset or on the site. Below-threshold routes still appear, under "not enough data yet", with their counts visible.
 - **D7 — complete service days only.** A service day is published only when `service_date < today` in Europe/Dublin.
 - **D8 — rolling 28-day leaderboard window.** Full history stays in the per-day CSVs.
 - Denominator for both rates is `scheduled - excluded` (tracker downtime never counts against the operator), consistent with the existing rollup.
@@ -750,12 +750,12 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Create: `C:\Users\Alex\Projects\ghost-bus\publish\__init__.py`
 - Create: `C:\Users\Alex\Projects\ghost-bus\publish\dataset.py`
 - Modify: `C:\Users\Alex\Projects\ghost-bus\.gitignore:6` (replace the line `data/` with `data/probe/`)
-- Test: `C:\Users\Alex\Projects\ghost-bus\tests\dataset_fixture.py` (create; shared by Tasks 5-8)
+- Test: `C:\Users\Alex\Projects\ghost-bus\tests\dataset_fixture.py` (create; shared by Tasks 5-6 and 8-9)
 - Test: `C:\Users\Alex\Projects\ghost-bus\tests\test_dataset_uptime.py`
 
 **Interfaces:**
 - Consumes: `classify/store.py` table `heartbeats(ts_utc TEXT PRIMARY KEY, ok INTEGER)`, where `ts_utc` is an aware-UTC `datetime.isoformat()` string written by `ingest/poller.py`, e.g. `2026-03-23T00:00:00.100000+00:00`.
-- Produces, relied on by Tasks 5-8:
+- Produces, relied on by Tasks 5-6 and 8-9:
   - `SCHEMA_VERSION: int`, `BASELINE_REQUIRED_DAYS: int`, `LOCAL_TZ: str`, `UTC`, `EXPECTED_MINUTES_PER_DAY: int`
   - `UPTIME_COLUMNS: tuple[str, ...]`
   - `_write_csv(path: pathlib.Path, columns, rows) -> None`
@@ -1136,7 +1136,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Consumes: `aggregate.rollup.route_day_rollup(db) -> list[dict]` with keys `route_id, service_date, scheduled, excluded, cancelled, completed, vanished, untracked` plus the six `RATE_KEYS`, each `float | None` (`None` when `scheduled - excluded <= 0`).
 - Consumes: `timetable/gtfs.py` tables `gtfs_routes(route_id, agency_id, route_short_name, route_long_name)` and `gtfs_agency(agency_id, agency_name)`.
 - Consumes from Task 4: `_write_csv`.
-- Produces, relied on by Tasks 7-8: `DAILY_COLUMNS: tuple[str, ...]`, `route_names(db) -> dict[str, tuple[str, str, str]]`, `unnamed_routes(db, names) -> list[str]`, `complete_service_days(db, today) -> list[str]`, `daily_rows_by_date(db, names) -> dict[str, list[dict]]`, `daily_rows(db, service_date, names) -> list[dict]`, `write_daily_csvs(db, data_dir, days, names) -> list[Path]`.
+- Produces, relied on by Tasks 8-9: `DAILY_COLUMNS: tuple[str, ...]`, `route_names(db) -> dict[str, tuple[str, str, str]]`, `unnamed_routes(db, names) -> list[str]`, `complete_service_days(db, today) -> list[str]`, `daily_rows_by_date(db, names) -> dict[str, list[dict]]`, `daily_rows(db, service_date, names) -> list[dict]`, `write_daily_csvs(db, data_dir, days, names) -> list[Path]`.
 
 `write_daily_csvs` rolls the outcomes table up **once** and buckets by date. `route_day_rollup` reads the whole `trip_outcomes` table with no `WHERE`, so calling it once per published day would re-roll ~9k trips/day × 365 days on a 1 GB VM and never finish. A test pins the single pass.
 
@@ -1439,7 +1439,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: `run_checks.check_conservation(db) -> dict`, `run_checks.check_outcomes_valid(db) -> dict`, `run_checks.check_rates_bounded(db) -> dict`, each returning `{"check": str, "passed": bool, "violations": list}`.
 - Consumes: `timetable/gtfs.py` table `gtfs_meta(key, value)`.
-- Produces, relied on by Task 7: `run_gate(db) -> dict[str, bool]`, `timetable_hash(db) -> str`, `timetable_loaded_at(db) -> str`, `_count(db, sql) -> int`.
+- Produces, relied on by Task 8: `run_gate(db) -> dict[str, bool]`, `timetable_hash(db) -> str`, `timetable_loaded_at(db) -> str`, `_count(db, sql) -> int`.
 - Produces: `timetable.gtfs.load_gtfs` additionally writes `gtfs_meta` key `gtfs_loaded_at`, an aware-UTC ISO-8601 string with second precision.
 
 The about-data page is required by the spec to state the timetable's load date, not just its hash. Nothing recorded that date, so `load_gtfs` starts recording it. Databases loaded before this change have no such key and report an empty string, which the site renders as an em dash — visibly unknown rather than silently blank or invented.
@@ -1648,7 +1648,199 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
-### Task 7: `manifest.json` and the 14-day baseline gate, in both directions
+### Task 7: `publish/slugs.py` — route id slugification with a deterministic, stable collision rule
+
+**Files:**
+- Create: `C:\Users\Alex\Projects\ghost-bus\publish\slugs.py`
+- Test: `C:\Users\Alex\Projects\ghost-bus\tests\test_site_slugs.py`
+
+`publish/__init__.py` already exists from Task 4. Do not recreate it.
+
+**Interfaces:**
+- Consumes: nothing. This module imports no other project module, deliberately.
+- Produces: `slugify(route_id: str) -> str`, `slug_map(route_ids: Iterable[str], existing: dict[str, str] | None = None) -> dict[str, str]`.
+
+**Why its own module, and why it comes before the manifest.** The route-id → slug map is *published data*: `publish/dataset.py` writes it into `data/manifest.json` on the VM (Task 8) and `publish/site.py` reads it back in CI (Task 16). Both need these two functions and neither may import the other — `dataset.py` opens the database and must never be reachable from the CI-only build path (D3/D4), and `site.py` must never reach the database. A third, dependency-free module is the only shape that satisfies both, so it is built before the first task that needs it.
+
+Collision rule, stated once and pinned: `slug_map` iterates `sorted(set(route_ids))`. Any route id present in `existing` keeps the slug it was published under, provided nothing else has already claimed it. The remaining ids are assigned in sorted order; the first claimant of a bare slug keeps it, and later collisions get `-2`, `-3`, … appended until the slug is free. An empty slug (a route id made entirely of punctuation) becomes `route` and falls into the same numbering. A route id in `existing` that is *not* in `route_ids` is dropped from the result and reserves nothing — carrying retired routes forward is the publisher's job (Task 8), not this function's.
+
+`existing` is what makes route URLs stable. Without it, a new route id that sorts *before* an incumbent and slugifies the same way would demote the incumbent from `03c-120-e-a` to `03c-120-e-a-2`, and its published URL would silently move. `publish/dataset.py` feeds the previously published map in.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `C:\Users\Alex\Projects\ghost-bus\tests\test_site_slugs.py`:
+
+```python
+from publish.slugs import slug_map, slugify
+
+
+def test_slugify_lowercases_and_replaces_spaces():
+    assert slugify("03C 120 e a") == "03c-120-e-a"
+
+
+def test_slugify_collapses_runs_and_strips_edges():
+    assert slugify("  46A//  Ballsbridge  ") == "46a-ballsbridge"
+
+
+def test_slugify_of_pure_punctuation_is_route():
+    assert slugify("///") == "route"
+
+
+def test_slugify_is_pure_ascii_and_filename_safe():
+    slug = slugify("Route <1> / éire")
+    assert all(c.isalnum() or c == "-" for c in slug)
+    assert slug == "route-1-ire"
+
+
+def test_slug_map_is_stable_and_collision_free():
+    ids = ["03C 120 e a", "03c-120-e-a", "03C/120/e/a", "zzz"]
+    first = slug_map(ids)
+    second = slug_map(list(reversed(ids)))
+    assert first == second
+    assert len(set(first.values())) == len(first)
+
+
+def test_slug_map_collision_numbering_is_sorted_order():
+    ids = ["03C/120/e/a", "03C 120 e a", "03c-120-e-a"]
+    got = slug_map(ids)
+    # sorted(set(ids)) == ['03C 120 e a', '03C/120/e/a', '03c-120-e-a']
+    assert got["03C 120 e a"] == "03c-120-e-a"
+    assert got["03C/120/e/a"] == "03c-120-e-a-2"
+    assert got["03c-120-e-a"] == "03c-120-e-a-3"
+
+
+def test_slug_map_handles_empty_slug_collisions():
+    got = slug_map(["///", "!!!"])
+    assert sorted(got.values()) == ["route", "route-2"]
+
+
+def test_slug_map_keeps_a_previously_published_slug():
+    """Published URLs must not move when a new route id arrives.
+
+    "03C 120 e a" sorts before "03C/120/e/a" (0x20 < 0x2F), so without the
+    existing map the newcomer would take the bare slug and demote the route
+    that has been live under it.
+    """
+    got = slug_map(["03C 120 e a", "03C/120/e/a"],
+                   existing={"03C/120/e/a": "03c-120-e-a"})
+    assert got["03C/120/e/a"] == "03c-120-e-a"
+    assert got["03C 120 e a"] == "03c-120-e-a-2"
+
+
+def test_slug_map_ignores_an_existing_entry_for_a_route_that_is_gone():
+    got = slug_map(["zzz"], existing={"vanished-route": "zzz", "zzz": "zzz-9"})
+    # The retired route reserves nothing; the live one keeps its published slug.
+    # publish/dataset.py is what carries a retired route's slug forward, by
+    # passing its id back in alongside the live ones (Task 8).
+    assert got == {"zzz": "zzz-9"}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd C:\Users\Alex\Projects\ghost-bus; python -m pytest tests/test_site_slugs.py -q`
+
+Expected: FAIL — collection error, `ModuleNotFoundError: No module named 'publish.slugs'`, reported as `ERROR tests/test_site_slugs.py` with `1 error`.
+
+- [ ] **Step 3: Write minimal implementation**
+
+Create `C:\Users\Alex\Projects\ghost-bus\publish\slugs.py`:
+
+```python
+"""Route id -> URL slug, shared by the publisher and the site builder.
+
+The slug map is published in data/manifest.json by publish/dataset.py and read
+back by publish/site.py in CI. Both sides must agree byte for byte, and neither
+may import the other (the publisher opens the database; the builder must never
+be able to), so the rule lives here on its own. stdlib only, no project imports.
+"""
+from __future__ import annotations
+
+import re
+from typing import Iterable
+
+_NON_SLUG = re.compile(r"[^a-z0-9]+")
+
+
+def slugify(route_id: str) -> str:
+    """Return a filename-safe slug for a GTFS route id.
+
+    Production route ids contain spaces and punctuation, e.g. "03C 120 e a".
+    Lowercase, replace every run of non-alphanumerics with a single hyphen,
+    strip leading and trailing hyphens. A route id with no alphanumerics at all
+    slugifies to "route"; slug_map resolves the collisions that follow.
+    """
+    slug = _NON_SLUG.sub("-", route_id.strip().lower()).strip("-")
+    return slug or "route"
+
+
+def slug_map(route_ids: Iterable[str],
+             existing: dict[str, str] | None = None) -> dict[str, str]:
+    """Map every route id to a unique slug, deterministically and stably.
+
+    A route id listed in `existing` keeps the slug it was published under, so
+    long as nothing else has claimed it first. Everything else is assigned in
+    sorted order: the first claimant of a bare slug keeps it, later collisions
+    get "-2", "-3", ... appended.
+
+    Without `existing`, a new route id sorting before an incumbent and
+    slugifying the same way would take the bare slug and move the incumbent's
+    published URL. publish/dataset.py feeds the previously published map in for
+    exactly that reason.
+    """
+    ids = sorted(set(route_ids))
+    mapping: dict[str, str] = {}
+    used: set[str] = set()
+
+    for route_id in ids:
+        slug = (existing or {}).get(route_id)
+        if slug and slug not in used:
+            mapping[route_id] = slug
+            used.add(slug)
+
+    for route_id in ids:
+        if route_id in mapping:
+            continue
+        base = slugify(route_id)
+        slug = base
+        suffix = 2
+        while slug in used:
+            slug = f"{base}-{suffix}"
+            suffix += 1
+        used.add(slug)
+        mapping[route_id] = slug
+
+    return {route_id: mapping[route_id] for route_id in ids}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd C:\Users\Alex\Projects\ghost-bus; python -m pytest tests/test_site_slugs.py -q; python -m pytest -q`
+
+Expected: PASS — `9 passed` for the file, full suite green with 0 failed, 0 errors.
+
+- [ ] **Step 5: Commit**
+
+```
+cd C:\Users\Alex\Projects\ghost-bus
+git add publish/slugs.py tests/test_site_slugs.py
+git commit -m "feat(publish): deterministic, stable route id slugification
+
+Production GTFS route ids contain spaces (\"03C 120 e a\"), so route page
+filenames need slugs. slug_map iterates sorted(set(ids)) and appends -2, -3 on
+collision, making the map independent of caller ordering, and honours an
+existing map first so a newly appearing route id cannot take a slug that is
+already live and move a published URL.
+
+Its own module because the map is published data: the VM writes it into
+data/manifest.json and CI reads it back to build the site, so both publish and
+site need the rule while neither may import the other.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 8: `manifest.json`, the published slug map, and the 14-day baseline gate, in both directions
 
 **Files:**
 - Modify: `C:\Users\Alex\Projects\ghost-bus\publish\dataset.py` (extend the import block; append after `timetable_loaded_at`)
@@ -1656,8 +1848,13 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes from Tasks 4-6: `SCHEMA_VERSION`, `BASELINE_REQUIRED_DAYS`, `UTC`, `local_today`, `uptime_days`, `write_uptime_csvs`, `route_names`, `unnamed_routes`, `complete_service_days`, `write_daily_csvs`, `run_gate`, `timetable_hash`, `timetable_loaded_at`, `_count`.
-- Produces, relied on by Task 8: `build_manifest(db, days, gate, names, now_utc) -> dict`, `write_manifest(data_dir, manifest) -> Path`, `write_dataset(db, data_dir, *, today=None, now_utc=None) -> dict`.
-- Produces the published manifest contract `publish/site.py` reads, with keys in this exact order: `schema_version`, `generated_at`, `timetable_hash`, `timetable_loaded_at`, `coverage` (`first_day`, `last_day`, `complete_days`), `scoreboard_ready`, `baseline_required_days`, `gate` (`conservation`, `rates_bounded`, `outcomes_valid`), `counts` (`observations`, `snapshots`, `trips_classified`), `unnamed_routes`.
+- Consumes from Task 7: `publish.slugs.slug_map`.
+- Produces, relied on by Task 9: `build_manifest(db, days, gate, names, slugs, now_utc) -> dict`, `write_manifest(data_dir, manifest) -> Path`, `write_dataset(db, data_dir, *, today=None, now_utc=None) -> dict`, `published_route_ids(db, days) -> list[str]`, `read_published_slugs(data_dir) -> dict[str, str]`, `published_slugs(route_ids, previous) -> dict[str, str]`.
+- Produces the published manifest contract `publish/site.py` reads, with keys in this exact order: `schema_version`, `generated_at`, `timetable_hash`, `timetable_loaded_at`, `coverage` (`first_day`, `last_day`, `complete_days`), `scoreboard_ready`, `baseline_required_days`, `gate` (`conservation`, `rates_bounded`, `outcomes_valid`), `counts` (`observations`, `snapshots`, `trips_classified`), `unnamed_routes`, `route_slugs`.
+
+**The slug map belongs to the dataset, not to the site output.** The site is only ever built by GitHub Actions (D4, Task 19), which checks out into a brand-new `_site` on an ephemeral runner every run. A map kept beside the previous *build* would therefore always read back empty in production and the stable-URL guarantee would never engage — a route page's public URL could move whenever the operator's route ids changed. The map is written here, into `data/manifest.json`, which CI checks out with the data, so the builder always sees the real previous map. Once a route page has a URL, that URL is permanent.
+
+**Retired routes keep their slugs.** `slug_map` drops entries for ids it was not asked about — correct for assignment, since a route that no longer runs must not reserve a slug against a live one. But a link to a withdrawn route must keep resolving rather than being handed to a different route, so `published_slugs` feeds the retired ids back in alongside the live ones: they keep the slug they were published under, and by being in the map they still reserve it. `slug_map`'s own semantics are unchanged.
 
 **The baseline gate is a state, not an event.** Below 14 complete days, `write_dataset` writes the manifest and the uptime CSVs and **removes** `data/daily/` if it exists. `data/` on the VM is a working copy of what is already public, so an additive-only gate would leave every previously published route CSV standing next to a page that says we publish nothing about any route — a restored database, a repaired table, or a `service_date` correction is enough to trigger it.
 
@@ -1670,7 +1867,7 @@ import datetime as dt
 import json
 
 from publish.dataset import (BASELINE_REQUIRED_DAYS, build_manifest,
-                             route_names, write_dataset)
+                             published_slugs, route_names, write_dataset)
 from tests.dataset_fixture import (GTFS_HASH, GTFS_LOADED_AT, SERVICE_DATE,
                                    build_db, consecutive_dates)
 
@@ -1689,7 +1886,7 @@ def test_manifest_has_exactly_the_spec_keys(tmp_path):
     assert list(manifest) == ["schema_version", "generated_at", "timetable_hash",
                               "timetable_loaded_at", "coverage", "scoreboard_ready",
                               "baseline_required_days", "gate", "counts",
-                              "unnamed_routes"]
+                              "unnamed_routes", "route_slugs"]
     assert list(manifest["coverage"]) == ["first_day", "last_day", "complete_days"]
     assert list(manifest["gate"]) == ["conservation", "rates_bounded",
                                       "outcomes_valid"]
@@ -1713,6 +1910,7 @@ def test_manifest_values_for_a_single_complete_day(tmp_path):
                  "outcomes_valid": True},
         "counts": {"observations": 3, "snapshots": 3, "trips_classified": 13},
         "unnamed_routes": ["03C 120 e a"],
+        "route_slugs": {"03C 120 e a": "03c-120-e-a", "R1": "r1", "R2": "r2"},
     }
 
 
@@ -1787,9 +1985,49 @@ def test_build_manifest_is_pure_and_writes_nothing(tmp_path):
     names = route_names(db)
     manifest = build_manifest(db, [SERVICE_DATE],
                               {"conservation": True, "rates_bounded": True,
-                               "outcomes_valid": True}, names, FIXED_NOW)
+                               "outcomes_valid": True}, names,
+                              {"R1": "r1"}, FIXED_NOW)
     assert manifest["generated_at"] == "2026-03-24T04:15:00+00:00"
+    assert manifest["route_slugs"] == {"R1": "r1"}
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_new_route_cannot_take_a_slug_published_to_an_incumbent():
+    """Assignment must honour what is already public.
+
+    "03C 120 e a" sorts before "03C/120/e/a" (0x20 < 0x2F), so on a fresh
+    assignment the newcomer would take the bare slug the incumbent is already
+    live under, and a published route URL would move.
+    """
+    got = published_slugs(["03C 120 e a", "03C/120/e/a"],
+                          {"03C/120/e/a": "03c-120-e-a"})
+    assert got["03C/120/e/a"] == "03c-120-e-a"
+    assert got["03C 120 e a"] == "03c-120-e-a-2"
+
+
+def test_a_retired_routes_slug_is_carried_forward_and_never_reassigned():
+    """A withdrawn route's URL must keep resolving to that route.
+
+    "GONE" has dropped out of the current window, so slug_map on its own would
+    drop it from the map and hand "gone" to the next route that slugifies the
+    same way — silently pointing an existing public link at a different route.
+    """
+    got = published_slugs(["gone", "R1"], {"GONE": "gone", "R1": "r1"})
+    assert got["GONE"] == "gone"
+    assert got["gone"] == "gone-2"
+    assert got["R1"] == "r1"
+
+
+def test_the_published_slug_map_is_stable_across_two_publishes(tmp_path):
+    """Second publish reads the first one's manifest back off disk."""
+    expected = {"03C 120 e a": "03c-120-e-a", "R1": "r1", "R2": "r2"}
+    first = write_dataset(build_db(service_dates=consecutive_dates(14)), tmp_path,
+                          today=dt.date(2026, 3, 16), now_utc=FIXED_NOW)
+    second = write_dataset(build_db(service_dates=consecutive_dates(14)), tmp_path,
+                           today=dt.date(2026, 3, 16), now_utc=FIXED_NOW)
+    assert first["route_slugs"] == expected
+    assert second["route_slugs"] == expected
+    assert read_manifest(tmp_path)["route_slugs"] == expected
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1825,14 +2063,58 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from aggregate.rollup import route_day_rollup
+from publish.slugs import slug_map
 from run_checks import check_conservation, check_outcomes_valid, check_rates_bounded
 ```
 
 Then append to the end of the file:
 
 ```python
+def published_route_ids(db: sqlite3.Connection, days: list[str]) -> list[str]:
+    """Every route id appearing in the published service days."""
+    if not days:
+        return []
+    # A range, not an IN list: `days` grows by one per day forever and would
+    # eventually blow past SQLite's bound-parameter limit.
+    return sorted({r for (r,) in db.execute(
+        "SELECT DISTINCT route_id FROM trip_outcomes "
+        "WHERE service_date BETWEEN ? AND ?", (days[0], days[-1]))})
+
+
+def read_published_slugs(data_dir) -> dict[str, str]:
+    """The route_slugs map from the manifest we published last time.
+
+    The map lives in the dataset rather than beside the previous site build
+    because the site is rebuilt from scratch on an ephemeral CI runner every
+    run: a map kept in the site output would always read back empty, and a
+    route page's public URL could move whenever route ids changed. data/ is a
+    working copy of what is already public, so this file is the real previous
+    map. A missing or unreadable manifest means "nothing published yet".
+    """
+    path = Path(data_dir) / "manifest.json"
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("route_slugs") or {}
+    except (ValueError, OSError):
+        return {}
+
+
+def published_slugs(route_ids, previous: dict[str, str]) -> dict[str, str]:
+    """The map to publish: every current route, plus every route ever published.
+
+    Retired route ids are fed back through slug_map alongside the live ones, so
+    they keep the slug they were published under and go on reserving it. A link
+    to a route that has since been withdrawn therefore still resolves to that
+    route, and can never be silently handed to a different one. slug_map's own
+    rule is unchanged - on its own it drops ids it was not asked about, which is
+    exactly why the carry-forward is done here and not there.
+    """
+    return slug_map(set(route_ids) | set(previous), existing=previous)
+
+
 def build_manifest(db: sqlite3.Connection, days: list[str], gate: dict,
-                   names: dict, now_utc: dt.datetime) -> dict:
+                   names: dict, slugs: dict, now_utc: dt.datetime) -> dict:
     """The machine-readable description of this release. Pure: writes nothing."""
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1854,6 +2136,10 @@ def build_manifest(db: sqlite3.Connection, days: list[str], gate: dict,
                    "snapshots": _count(db, "SELECT COUNT(*) FROM heartbeats WHERE ok=1"),
                    "trips_classified": _count(db, "SELECT COUNT(*) FROM trip_outcomes")},
         "unnamed_routes": unnamed_routes(db, names),
+        # Published here, not in the site output: CI checks this file out and
+        # rebuilds _site from scratch every run, so this is the only copy that
+        # survives to keep route URLs where they are.
+        "route_slugs": dict(slugs),
     }
 
 
@@ -1876,6 +2162,9 @@ def write_dataset(db: sqlite3.Connection, data_dir, *,
     gate = run_gate(db)
     names = route_names(db)
     days = complete_service_days(db, today)
+    # Read the previous map BEFORE write_manifest overwrites it below.
+    slugs = published_slugs(published_route_ids(db, days),
+                            read_published_slugs(data_dir))
 
     # Uptime is deliberately exempt from the 14-day baseline gate (spec D6): it
     # is our own downtime, not a claim about any operator, and the site's
@@ -1891,7 +2180,7 @@ def write_dataset(db: sqlite3.Connection, data_dir, *,
         # standing next to a page saying we publish nothing about any route.
         shutil.rmtree(daily_dir)
 
-    manifest = build_manifest(db, days, gate, names, now_utc)
+    manifest = build_manifest(db, days, gate, names, slugs, now_utc)
     write_manifest(data_dir, manifest)
     return manifest
 ```
@@ -1900,17 +2189,25 @@ def write_dataset(db: sqlite3.Connection, data_dir, *,
 
 Run: `cd C:\Users\Alex\Projects\ghost-bus; python -m pytest tests/test_dataset_manifest.py -q; python -m pytest -q`
 
-Expected: PASS — `9 passed` for the file, full suite green with 0 failed, 0 errors.
+Expected: PASS — `12 passed` for the file, full suite green with 0 failed, 0 errors.
 
 - [ ] **Step 5: Commit**
 
 ```
 cd C:\Users\Alex\Projects\ghost-bus
 git add publish/dataset.py tests/test_dataset_manifest.py
-git commit -m "feat(publish): manifest.json and the 14-day baseline gate
+git commit -m "feat(publish): manifest.json, the published slug map, and the 14-day gate
 
 The manifest carries schema version, generation time, timetable hash and load
-date, coverage, gate results, counts, and every route id we could not name.
+date, coverage, gate results, counts, every route id we could not name, and the
+route id to URL slug map.
+
+route_slugs lives in the dataset, not in the site output: the site is built
+only by CI, which checks out into a brand-new _site on an ephemeral runner, so
+a map kept beside the previous build would always read back empty and published
+route URLs would move whenever route ids changed. Retired route ids are carried
+forward so a link to a withdrawn route keeps resolving instead of being
+reassigned to a different one.
 
 The baseline gate works in both directions: below 14 complete days nothing
 route-level is written, and any previously published data/daily is removed.
@@ -1923,7 +2220,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
-### Task 8: Publish-gate enforcement and the dataset CLI
+### Task 9: Publish-gate enforcement and the dataset CLI
 
 **Files:**
 - Modify: `C:\Users\Alex\Projects\ghost-bus\publish\dataset.py` (extend the import block; add `GateFailed`; edit `write_dataset`; append the CLI)
@@ -1931,7 +2228,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `ghostbus_config.get_db(path=None) -> sqlite3.Connection` (sets `PRAGMA journal_mode=WAL` and `PRAGMA busy_timeout=30000`).
-- Consumes from Task 7: `run_gate`, `write_dataset`.
+- Consumes from Task 8: `run_gate`, `write_dataset`.
 - Produces: `GateFailed(Exception)`; `main(argv: list[str] | None = None) -> int`, runnable as `python -m publish.dataset --db <path> --data-dir <path>`.
 
 **This module never touches git.** There is no `--commit` flag and no `_git_publish` helper, and none may be added. `ops/publish.sh` is the single VM entry point that commits and pushes: it holds the dirty-tree guard, `GIT_TERMINAL_PROMPT=0`, and the `GIT_ASKPASS` wiring that a bare `subprocess.run(["git", "push"])` from here would have no way to supply. A test pins the absence.
@@ -2099,6 +2396,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from aggregate.rollup import route_day_rollup
+from publish.slugs import slug_map
 from run_checks import check_conservation, check_outcomes_valid, check_rates_bounded
 ```
 
@@ -2117,6 +2415,7 @@ from zoneinfo import ZoneInfo
 
 from aggregate.rollup import route_day_rollup
 from ghostbus_config import get_db
+from publish.slugs import slug_map
 from run_checks import check_conservation, check_outcomes_valid, check_rates_bounded
 
 
@@ -2210,7 +2509,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
-### Task 9: `publish/site.py` foundations — page shell, stylesheet, escaping and formatting helpers
+### Task 10: `publish/site.py` foundations — page shell, stylesheet, escaping and formatting helpers
 
 **Files:**
 - Create: `C:\Users\Alex\Projects\ghost-bus\publish\site.py`
@@ -2221,9 +2520,9 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 `publish/__init__.py` already exists from Task 4. Do not recreate it.
 
 **Interfaces:**
-- Consumes: `aggregate.rates.rate_with_interval` (imported here so every later site task inherits it; first used in Task 12).
+- Consumes: `aggregate.rates.rate_with_interval` and `publish.slugs.slug_map` (imported here so every later site task inherits them; `rate_with_interval` is first used in Task 12, `slug_map` in Task 16). `publish/site.py` never imports `publish/dataset.py` — the builder must not be able to reach the database (D3/D4), which is why the slug rule is its own module.
 - Produces: `SITE_DIR: Path`, `EM_DASH`, `EN_DASH`, `COUNT_FIELDS`, `RATE_FIELDS`, `esc(value) -> str`, `fmt_pct(value: float | None) -> str`, `fmt_rate(interval) -> str`, `fmt_interval(interval) -> str`, `route_label(entry: dict) -> str`, `load_template(name: str, site_dir=SITE_DIR) -> string.Template`, `render_nav(root: str, current: str) -> str`, `render_page(site_dir, *, title, root, current, generated_at, content) -> str`.
-- Produces the import block every later site task extends, in this exact order: `csv`, `datetime as dt`, `html`, `json`, `re`, `pathlib.Path`, `string.Template`, `typing.Iterable`, then `from aggregate.rates import rate_with_interval`.
+- Produces the import block every later site task extends, in this exact order: `csv`, `datetime as dt`, `html`, `json`, `re`, `pathlib.Path`, `string.Template`, then `from aggregate.rates import rate_with_interval` and `from publish.slugs import slug_map`.
 
 `root` is `""` for top-level pages and `"../"` for pages under `route/`, so every link stays relative and the site works from any path on GitHub Pages. No page ever references a host other than its own.
 
@@ -2432,9 +2731,9 @@ import json
 import re
 from pathlib import Path
 from string import Template
-from typing import Iterable
 
 from aggregate.rates import rate_with_interval
+from publish.slugs import slug_map
 
 COUNT_FIELDS = ("scheduled", "excluded", "cancelled", "completed", "vanished", "untracked")
 RATE_FIELDS = (
@@ -2531,180 +2830,10 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
-### Task 10: Route id slugification with a deterministic, stable collision rule
-
-**Files:**
-- Modify: `C:\Users\Alex\Projects\ghost-bus\publish\site.py` (append after `render_page`)
-- Test: `C:\Users\Alex\Projects\ghost-bus\tests\test_site_slugs.py`
-
-**Interfaces:**
-- Consumes: nothing.
-- Produces: `slugify(route_id: str) -> str`, `slug_map(route_ids: Iterable[str], existing: dict[str, str] | None = None) -> dict[str, str]`.
-
-Collision rule, stated once and pinned: `slug_map` iterates `sorted(set(route_ids))`. Any route id present in `existing` keeps the slug it was published under, provided nothing else has already claimed it. The remaining ids are assigned in sorted order; the first claimant of a bare slug keeps it, and later collisions get `-2`, `-3`, … appended until the slug is free. An empty slug (a route id made entirely of punctuation) becomes `route` and falls into the same numbering.
-
-`existing` is what makes route URLs stable. Without it, a new route id that sorts *before* an incumbent and slugifies the same way would demote the incumbent from `03c-120-e-a` to `03c-120-e-a-2`, and its published URL would silently move. `build_site` feeds the previous build's manifest in.
-
-- [ ] **Step 1: Write the failing test**
-
-Create `C:\Users\Alex\Projects\ghost-bus\tests\test_site_slugs.py`:
-
-```python
-from publish.site import slug_map, slugify
-
-
-def test_slugify_lowercases_and_replaces_spaces():
-    assert slugify("03C 120 e a") == "03c-120-e-a"
-
-
-def test_slugify_collapses_runs_and_strips_edges():
-    assert slugify("  46A//  Ballsbridge  ") == "46a-ballsbridge"
-
-
-def test_slugify_of_pure_punctuation_is_route():
-    assert slugify("///") == "route"
-
-
-def test_slugify_is_pure_ascii_and_filename_safe():
-    slug = slugify("Route <1> / éire")
-    assert all(c.isalnum() or c == "-" for c in slug)
-    assert slug == "route-1-ire"
-
-
-def test_slug_map_is_stable_and_collision_free():
-    ids = ["03C 120 e a", "03c-120-e-a", "03C/120/e/a", "zzz"]
-    first = slug_map(ids)
-    second = slug_map(list(reversed(ids)))
-    assert first == second
-    assert len(set(first.values())) == len(first)
-
-
-def test_slug_map_collision_numbering_is_sorted_order():
-    ids = ["03C/120/e/a", "03C 120 e a", "03c-120-e-a"]
-    got = slug_map(ids)
-    # sorted(set(ids)) == ['03C 120 e a', '03C/120/e/a', '03c-120-e-a']
-    assert got["03C 120 e a"] == "03c-120-e-a"
-    assert got["03C/120/e/a"] == "03c-120-e-a-2"
-    assert got["03c-120-e-a"] == "03c-120-e-a-3"
-
-
-def test_slug_map_handles_empty_slug_collisions():
-    got = slug_map(["///", "!!!"])
-    assert sorted(got.values()) == ["route", "route-2"]
-
-
-def test_slug_map_keeps_a_previously_published_slug():
-    """Published URLs must not move when a new route id arrives.
-
-    "03C 120 e a" sorts before "03C/120/e/a" (0x20 < 0x2F), so without the
-    existing map the newcomer would take the bare slug and demote the route
-    that has been live under it.
-    """
-    got = slug_map(["03C 120 e a", "03C/120/e/a"],
-                   existing={"03C/120/e/a": "03c-120-e-a"})
-    assert got["03C/120/e/a"] == "03c-120-e-a"
-    assert got["03C 120 e a"] == "03c-120-e-a-2"
-
-
-def test_slug_map_ignores_an_existing_entry_for_a_route_that_is_gone():
-    got = slug_map(["zzz"], existing={"vanished-route": "zzz", "zzz": "zzz-9"})
-    # The retired route reserves nothing; the live one keeps its published slug.
-    assert got == {"zzz": "zzz-9"}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd C:\Users\Alex\Projects\ghost-bus; python -m pytest tests/test_site_slugs.py -q`
-
-Expected: FAIL — collection error, `ImportError: cannot import name 'slug_map' from 'publish.site'`, reported as `ERROR tests/test_site_slugs.py` with `1 error`.
-
-- [ ] **Step 3: Write minimal implementation**
-
-Append to the end of `C:\Users\Alex\Projects\ghost-bus\publish\site.py`:
-
-```python
-_NON_SLUG = re.compile(r"[^a-z0-9]+")
-
-
-def slugify(route_id: str) -> str:
-    """Return a filename-safe slug for a GTFS route id.
-
-    Production route ids contain spaces and punctuation, e.g. "03C 120 e a".
-    Lowercase, replace every run of non-alphanumerics with a single hyphen,
-    strip leading and trailing hyphens. A route id with no alphanumerics at all
-    slugifies to "route"; slug_map resolves the collisions that follow.
-    """
-    slug = _NON_SLUG.sub("-", route_id.strip().lower()).strip("-")
-    return slug or "route"
-
-
-def slug_map(route_ids: Iterable[str],
-             existing: dict[str, str] | None = None) -> dict[str, str]:
-    """Map every route id to a unique slug, deterministically and stably.
-
-    A route id listed in `existing` keeps the slug it was published under, so
-    long as nothing else has claimed it first. Everything else is assigned in
-    sorted order: the first claimant of a bare slug keeps it, later collisions
-    get "-2", "-3", ... appended.
-
-    Without `existing`, a new route id sorting before an incumbent and
-    slugifying the same way would take the bare slug and move the incumbent's
-    published URL. build_site feeds the previous build's map in for exactly
-    that reason.
-    """
-    ids = sorted(set(route_ids))
-    mapping: dict[str, str] = {}
-    used: set[str] = set()
-
-    for route_id in ids:
-        slug = (existing or {}).get(route_id)
-        if slug and slug not in used:
-            mapping[route_id] = slug
-            used.add(slug)
-
-    for route_id in ids:
-        if route_id in mapping:
-            continue
-        base = slugify(route_id)
-        slug = base
-        suffix = 2
-        while slug in used:
-            slug = f"{base}-{suffix}"
-            suffix += 1
-        used.add(slug)
-        mapping[route_id] = slug
-
-    return {route_id: mapping[route_id] for route_id in ids}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd C:\Users\Alex\Projects\ghost-bus; python -m pytest tests/test_site_slugs.py -q; python -m pytest -q`
-
-Expected: PASS — `9 passed` for the file, full suite green with 0 failed, 0 errors.
-
-- [ ] **Step 5: Commit**
-
-```
-cd C:\Users\Alex\Projects\ghost-bus
-git add publish/site.py tests/test_site_slugs.py
-git commit -m "feat(site): deterministic, stable route id slugification
-
-Production GTFS route ids contain spaces (\"03C 120 e a\"), so route page
-filenames need slugs. slug_map iterates sorted(set(ids)) and appends -2, -3 on
-collision, making the map independent of caller ordering, and honours an
-existing map first so a newly appearing route id cannot take a slug that is
-already live and move a published URL.
-
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
-```
-
----
-
 ### Task 11: Read the published dataset (manifest, daily CSVs, uptime CSVs)
 
 **Files:**
-- Modify: `C:\Users\Alex\Projects\ghost-bus\publish\site.py` (append after `slug_map`)
+- Modify: `C:\Users\Alex\Projects\ghost-bus\publish\site.py` (append after `render_page`)
 - Create: `C:\Users\Alex\Projects\ghost-bus\tests\site_fixtures.py`
 - Test: `C:\Users\Alex\Projects\ghost-bus\tests\test_site_readers.py`
 
@@ -2712,7 +2841,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: the layout written by `publish/dataset.py` — `data/manifest.json`; `data/daily/YYYY-MM-DD.csv` with columns `service_date, route_id, route_short_name, route_long_name, agency_name, scheduled, excluded, cancelled, completed, vanished, untracked, vanished_rate, vanished_lo, vanished_hi, untracked_rate, untracked_lo, untracked_hi`; `data/uptime/YYYY-MM-DD.csv` with `service_date, expected_minutes, ok_minutes, uptime_fraction`.
-- Consumes from Task 9: `COUNT_FIELDS`, `RATE_FIELDS`.
+- Consumes from Task 10: `COUNT_FIELDS`, `RATE_FIELDS`.
 - Produces: `read_manifest(data_dir) -> dict`, `read_daily(data_dir) -> list[dict]`, `read_uptime(data_dir) -> list[dict]`.
 - Produces (test side): `tests/site_fixtures.py` exposing `DAILY_COLUMNS`, `UPTIME_COLUMNS`, `DEFAULT_MANIFEST`, `daily_row(service_date, route_id, **kw)`, `uptime_row(service_date, expected_minutes=1440, ok_minutes=1440, uptime_fraction=None)`, `write_dataset(root, daily_rows=(), uptime_rows=(), manifest=None) -> Path`. Every later site task imports these.
 
@@ -2754,6 +2883,10 @@ DEFAULT_MANIFEST = {
     "gate": {"conservation": True, "rates_bounded": True, "outcomes_valid": True},
     "counts": {"observations": 128400, "snapshots": 40320, "trips_classified": 9111},
     "unnamed_routes": [],
+    # The published route-id -> slug map. Empty here so each test states the
+    # map it cares about; the builder falls back to computing one for any route
+    # id the dataset does not carry.
+    "route_slugs": {},
 }
 
 
@@ -3002,11 +3135,11 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Test: `C:\Users\Alex\Projects\ghost-bus\tests\test_site_leaderboard.py`
 
 **Interfaces:**
-- Consumes: `aggregate.rates.rate_with_interval(successes, trials) -> tuple[float, float, float] | None` (imported by Task 9); `read_daily` rows (Task 11).
+- Consumes: `aggregate.rates.rate_with_interval(successes, trials) -> tuple[float, float, float] | None` (imported by Task 10); `read_daily` rows (Task 11).
 - Produces: `WINDOW_DAYS = 28`, `MIN_TRIPS = 30`, `window_dates(rows, window=WINDOW_DAYS) -> list[str]`, `aggregate_window(rows, window=WINDOW_DAYS) -> list[dict]`, `leaderboard(rows, window=WINDOW_DAYS, min_trips=MIN_TRIPS) -> tuple[list[dict], list[dict]]` (ranked, unranked).
 - Each entry dict carries exactly: `route_id, route_short_name, route_long_name, agency_name, days, scheduled, excluded, cancelled, completed, vanished, untracked, trials, vanished_interval, untracked_interval`.
 
-**The ranking gate counts trips we could judge, not trips scheduled.** `trials = scheduled - excluded` is the denominator of both rates and the number the board displays as "Trips judged", so it is also the number the gate reads. Gating on `scheduled` would let a route with 30 scheduled and 29 excluded be ranked on a **single observation**: 100% vanished, Wilson lower bound 0.2065, straight to the top of a public list of the worst routes. A test pins that case in the unranked list.
+**The ranking gate counts judgeable trips (`scheduled − excluded`), not trips scheduled** — the spec's D6 wording exactly. `trials = scheduled - excluded` is the denominator of both rates and the number the board displays as "Trips judged", so it is also the number the gate reads. Gating on `scheduled` would let a route with 30 scheduled and 29 excluded be ranked on a **single observation**: 100% vanished, Wilson lower bound 0.2065, straight to the top of a public list of the worst routes. A test pins that case in the unranked list.
 
 Ranked order is the Wilson **lower bound** of the **vanished** rate, descending. The point estimate is only a tiebreak below it; the untracked rate has no influence on position at all. Nothing anywhere sums the two rates or the two counts, and a test asserts no entry field equals `vanished + untracked`.
 
@@ -3223,10 +3356,10 @@ def leaderboard(rows: list[dict], window: int = WINDOW_DAYS,
                 min_trips: int = MIN_TRIPS) -> tuple[list[dict], list[dict]]:
     """Return (ranked, unranked).
 
-    Ranking requires >= min_trips trips we could actually JUDGE in the window -
-    trials, i.e. scheduled minus excluded, which is the denominator of both
-    rates and the number the board shows. Gating on `scheduled` would let a
-    route with 30 scheduled and 29 excluded be ranked on one observation.
+    Ranking requires >= min_trips JUDGEABLE trips in the window (D6): trials,
+    i.e. scheduled minus excluded, which is the denominator of both rates and
+    the number the board shows. Gating on `scheduled` would let a route with
+    30 scheduled and 29 excluded be ranked on one observation.
 
     Ranked order is the Wilson LOWER bound of the VANISHED rate, descending,
     worst first (D2). The point estimate is only a tiebreak below it, and the
@@ -3283,7 +3416,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Test: `C:\Users\Alex\Projects\ghost-bus\tests\test_site_index.py`
 
 **Interfaces:**
-- Consumes: `leaderboard`, `window_dates`, `slug_map`, `render_page`, `load_template`, `fmt_rate`, `fmt_interval`, `esc`, `route_label`, `EM_DASH`, and the `read_manifest`/`read_uptime` row shapes.
+- Consumes: `leaderboard`, `window_dates`, `publish.slugs.slug_map` (Task 7), `render_page`, `load_template`, `fmt_rate`, `fmt_interval`, `esc`, `route_label`, `EM_DASH`, and the `read_manifest`/`read_uptime` row shapes.
 - Produces: `UPTIME_STRIP_DAYS = 30`, `render_uptime_strip(uptime_rows, last_day, days=UPTIME_STRIP_DAYS) -> str`, `render_board(ranked, unranked, slugs) -> str`, `render_index(site_dir, manifest, daily_rows, uptime_rows, ranked, unranked, slugs) -> str`.
 
 Missing-day rule: a calendar day inside the strip with no uptime row renders as a `gap` cell reading "no data" — never interpolated, never filled with a neighbour's value. Sample size appears on every leaderboard row (the "Trips judged" column, `trials`, with scheduled/excluded in its `title`).
@@ -3300,7 +3433,8 @@ Create `C:\Users\Alex\Projects\ghost-bus\tests\test_site_index.py`:
 from tests.site_fixtures import DEFAULT_MANIFEST, daily_row, uptime_row
 
 from publish.site import (SITE_DIR, fmt_rate, leaderboard, render_index,
-                          render_uptime_strip, slug_map)
+                          render_uptime_strip)
+from publish.slugs import slug_map
 
 
 def one_day(route_id, scheduled, vanished=0, untracked=0, excluded=0,
@@ -3659,7 +3793,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Test: `C:\Users\Alex\Projects\ghost-bus\tests\test_site_route_pages.py`
 
 **Interfaces:**
-- Consumes: entries from `aggregate_window`/`leaderboard`, `window_dates`, `render_page`, `load_template`, `fmt_rate`, `fmt_interval`, `esc`, `route_label`, `EM_DASH`, `slug_map`.
+- Consumes: entries from `aggregate_window`/`leaderboard`, `window_dates`, `render_page`, `load_template`, `fmt_rate`, `fmt_interval`, `esc`, `route_label`, `EM_DASH`, `publish.slugs.slug_map` (Task 7).
 - Produces: `render_route(site_dir, manifest, entry, daily_rows, slugs, position=None) -> str`.
 
 Two honesty rules, both tested, both consequences of the index copy:
@@ -3674,7 +3808,8 @@ Create `C:\Users\Alex\Projects\ghost-bus\tests\test_site_route_pages.py`:
 ```python
 from tests.site_fixtures import DEFAULT_MANIFEST, daily_row
 
-from publish.site import SITE_DIR, leaderboard, render_route, slug_map
+from publish.site import SITE_DIR, leaderboard, render_route
+from publish.slugs import slug_map
 
 
 def rows_for(route_id, days_and_counts, **kw):
@@ -3947,7 +4082,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Test: `C:\Users\Alex\Projects\ghost-bus\tests\test_site_prose_pages.py`
 
 **Interfaces:**
-- Consumes: `render_page`, `esc`, `EM_DASH`, and the manifest keys `schema_version`, `generated_at`, `timetable_hash`, `timetable_loaded_at`, `coverage.{first_day,last_day,complete_days}`, `counts.{observations,snapshots,trips_classified}`, `unnamed_routes`. `timetable_loaded_at` is emitted by `publish/dataset.py` (Task 7); this page falls back to an em dash if it is absent so an older dataset degrades visibly rather than crashing the build.
+- Consumes: `render_page`, `esc`, `EM_DASH`, and the manifest keys `schema_version`, `generated_at`, `timetable_hash`, `timetable_loaded_at`, `coverage.{first_day,last_day,complete_days}`, `counts.{observations,snapshots,trips_classified}`, `unnamed_routes`. `timetable_loaded_at` is emitted by `publish/dataset.py` (Task 8); this page falls back to an em dash if it is absent so an older dataset degrades visibly rather than crashing the build.
 - Produces: `render_methodology(site_dir, manifest) -> str`, `render_about_data(site_dir, manifest, data_dir) -> str`.
 
 The methodology prose below is the finished copy. Do not paraphrase it, shorten it, or "improve" it while implementing — it is the project's public defence of its own numbers and every clause is load-bearing. The claim test lowercases both sides, so capitalisation in the prose is free but wording is not.
@@ -4291,10 +4426,12 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 - Test: `C:\Users\Alex\Projects\ghost-bus\tests\test_site_build.py`
 
 **Interfaces:**
-- Consumes: every renderer from Tasks 9–15.
-- Produces: `DatasetError(RuntimeError)`, `build_site(data_dir, out_dir, site_dir=SITE_DIR) -> dict` (returns the augmented manifest it wrote) and `main(argv=None) -> int`, invoked as `python -m publish.site --data data --out _site`.
+- Consumes: every renderer from Tasks 10–15; `route_slugs` from the published manifest (Task 8); `publish.slugs.slug_map` (Task 7).
+- Produces: `DatasetError(RuntimeError)`, `build_site(data_dir, out_dir, site_dir=SITE_DIR) -> dict` (returns the manifest it wrote) and `main(argv=None) -> int`, invoked as `python -m publish.site --data data --out _site`.
 
-`build_site` writes `<out>/index.html`, `<out>/methodology.html`, `<out>/about-data.html`, `<out>/style.css`, `<out>/route/<slug>.html` for every route (only when `scoreboard_ready`), an **allowlisted** copy of the dataset at `<out>/data/` so every CSV linked from the about page resolves, and `<out>/manifest.json` — the published manifest plus a `route_slugs` object recording the route-id-to-slug map, so the slug for any route id is auditable from the site itself and the next build can keep URLs stable.
+`build_site` writes `<out>/index.html`, `<out>/methodology.html`, `<out>/about-data.html`, `<out>/style.css`, `<out>/route/<slug>.html` for every route (only when `scoreboard_ready`), an **allowlisted** copy of the dataset at `<out>/data/` so every CSV linked from the about page resolves, and `<out>/manifest.json`, so the slug for any route id is auditable from the site itself.
+
+**Route URLs come from the dataset, and the builder never reads its own output.** `route_slugs` is written by the VM into `data/manifest.json` (Task 8) and checked out here with the data. The builder takes that map as given; it computes a slug only for a route id the map does not carry, which should not happen — the publisher assigns one to every route it publishes — and is a fallback rather than a `KeyError` mid-build. Reading the map back out of `<out>/manifest.json` would be worthless: CI checks out into a brand-new `_site` on an ephemeral runner every run (D4, Task 19), so that file never exists when the build starts, and the stable-URL guarantee would never engage in production even though a test reusing one output directory inside a single process would pass.
 
 Two fail-closed rules, both tested. **Allowlisted copy:** only `manifest.json` and `daily|uptime/YYYY-MM-DD.csv` are copied; anything else under `data/` aborts the build. A blanket `copytree` would serve an attacker-written `data/x.html` from the site's own origin, riding the legitimate token through the legitimate workflow. **Gate consistency:** if `scoreboard_ready` is false while `data/daily/` exists, the build refuses rather than rendering "we publish nothing about any route" on a page that links route data.
 
@@ -4312,7 +4449,8 @@ import pytest
 from tests.site_fixtures import daily_row, uptime_row, write_dataset
 
 from publish.site import (DatasetError, build_site, leaderboard, read_daily,
-                          render_board, slug_map)
+                          render_board)
+from publish.slugs import slug_map
 
 GOLDEN = Path(__file__).parent / "golden" / "index_board.html"
 
@@ -4402,22 +4540,54 @@ def test_build_site_records_the_slug_map_in_the_manifest(tmp_path):
     assert on_disk["schema_version"] == 1
 
 
-def test_build_site_reuses_the_previous_slug_map_so_urls_are_stable(tmp_path):
-    data = ready_dataset(tmp_path)
+def incumbent_dataset(tmp_path):
+    """A dataset whose manifest already publishes a slug for an incumbent route.
+
+    "03C 120 e a" sorts before "03C/120/e/a" (0x20 < 0x2F), so a fresh
+    assignment would give the bare slug to the newcomer and move the
+    incumbent's live URL. The published map is what stops that.
+    """
+    rows = read_daily(ready_dataset(tmp_path)) + [
+        day_rows("03C/120/e/a", 40, vanished=2, route_short_name="120x")]
+    return write_dataset(
+        tmp_path / "data", daily_rows=rows,
+        uptime_rows=[uptime_row("2026-06-28", 1440, 1440)],
+        manifest={"coverage": {"first_day": "2026-06-28",
+                               "last_day": "2026-06-28", "complete_days": 28},
+                  "route_slugs": {"03C/120/e/a": "03c-120-e-a"}})
+
+
+def test_build_site_honours_the_slug_map_published_in_the_dataset(tmp_path):
+    """The dataset decides route URLs; the builder obeys the map it is given."""
+    data = incumbent_dataset(tmp_path)
     out = tmp_path / "_site"
-    build_site(data, out)
-    # A new route id that sorts before the incumbent and slugifies the same way
-    # must not evict it from its published filename.
-    extra = day_rows("03C/120/e/a", 40, vanished=2, route_short_name="120x")
-    rows = read_daily(data) + [extra]
-    write_dataset(tmp_path / "data", daily_rows=rows,
-                  uptime_rows=[uptime_row("2026-06-28", 1440, 1440)],
-                  manifest={"coverage": {"first_day": "2026-06-28",
-                                         "last_day": "2026-06-28",
-                                         "complete_days": 28}})
     written = build_site(data, out)
-    assert written["route_slugs"]["03C 120 e a"] == "03c-120-e-a"
-    assert written["route_slugs"]["03C/120/e/a"] == "03c-120-e-a-2"
+    assert written["route_slugs"]["03C/120/e/a"] == "03c-120-e-a"
+    assert written["route_slugs"]["03C 120 e a"] == "03c-120-e-a-2"
+    assert (out / "route" / "03c-120-e-a.html").is_file()
+    assert (out / "route" / "03c-120-e-a-2.html").is_file()
+
+
+def test_route_urls_are_identical_across_two_fresh_output_directories(tmp_path):
+    """Models the ephemeral CI runner, where _site never survives a run.
+
+    The stable-URL guarantee has to come from the dataset, which is checked
+    out, and not from the previous build, which on a fresh runner does not
+    exist. Rebuilding into ONE reused out_dir would pass even if the map were
+    read back out of the site's own output - that is exactly the bug this pins,
+    so the two builds must go to two different, previously nonexistent dirs.
+    """
+    data = incumbent_dataset(tmp_path)
+
+    def route_files(out):
+        return sorted(p.name for p in (out / "route").iterdir())
+
+    first = build_site(data, tmp_path / "run-1")
+    second = build_site(data, tmp_path / "run-2")
+
+    assert first["route_slugs"] == second["route_slugs"]
+    assert route_files(tmp_path / "run-1") == route_files(tmp_path / "run-2")
+    assert "03c-120-e-a.html" in route_files(tmp_path / "run-1")
 
 
 def test_build_site_is_idempotent(tmp_path):
@@ -4557,23 +4727,15 @@ def _copy_dataset(data_dir: Path, dest: Path) -> None:
         shutil.copyfile(path, target)
 
 
-def _previous_slugs(out_dir: Path) -> dict[str, str]:
-    """The last build's route_slugs, so published URLs survive a new route."""
-    path = out_dir / "manifest.json"
-    if not path.is_file():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8")).get("route_slugs") or {}
-    except (ValueError, OSError):
-        return {}
-
-
 def build_site(data_dir, out_dir, site_dir=SITE_DIR) -> dict:
     """Render the whole site from the published dataset into out_dir.
 
-    Returns the manifest as written to out_dir - the published manifest plus a
-    route_slugs map, so the id-to-filename mapping is auditable from the site
-    and the next build can keep every URL where it was.
+    Returns the manifest as written to out_dir, so the id-to-filename mapping
+    is auditable from the site as well as from the dataset.
+
+    Route URLs come from the dataset's own route_slugs map and never from a
+    previous build: CI checks the dataset out beside the code and renders into
+    a brand-new _site every run, so out_dir is always empty when we start.
     """
     data_dir = Path(data_dir)
     out_dir = Path(out_dir)
@@ -4594,8 +4756,11 @@ def build_site(data_dir, out_dir, site_dir=SITE_DIR) -> dict:
     slugs: dict[str, str] = {}
     if ready:
         ranked, unranked = leaderboard(daily_rows)
+        # The publisher assigns a slug to every route it publishes, so the map
+        # should already cover all of these; slug_map fills in anything missing
+        # rather than raising mid-build, and never moves a published entry.
         slugs = slug_map((entry["route_id"] for entry in ranked + unranked),
-                         existing=_previous_slugs(out_dir))
+                         existing=manifest.get("route_slugs") or {})
 
     out_dir.mkdir(parents=True, exist_ok=True)
     pages = {
@@ -4624,6 +4789,9 @@ def build_site(data_dir, out_dir, site_dir=SITE_DIR) -> dict:
     _copy_dataset(data_dir, out_dir / "data")
 
     written = dict(manifest)
+    # The slugs of the pages this build actually emitted. The dataset's own
+    # manifest - copied verbatim to <out>/data/manifest.json - remains the
+    # authority, and carries entries for withdrawn routes too.
     written["route_slugs"] = slugs
     _write(out_dir / "manifest.json", json.dumps(written, indent=2, sort_keys=True) + "\n")
     return written
@@ -4659,7 +4827,7 @@ Open `tests/golden/index_board.html` and confirm by eye: BIG is row 1 and SMALL 
 
 Run: `cd C:\Users\Alex\Projects\ghost-bus; python -m pytest tests/test_site_build.py -q; python -m pytest -q`
 
-Expected: PASS — `12 passed` for the file, full suite green with 0 failed, 0 errors.
+Expected: PASS — `13 passed` for the file, full suite green with 0 failed, 0 errors.
 
 - [ ] **Step 5: Commit**
 
@@ -4672,10 +4840,17 @@ feat(site): build_site end to end plus CLI entry point
 Renders index, methodology, about-data and one page per route from the
 published CSVs, copies only the dataset files the publisher produces (an
 unexpected path aborts the build rather than serving it from our own origin),
-and writes a manifest carrying the route id to slug map, which the next build
-reuses so published URLs never move. Refuses to build route data behind a
-pre-baseline page. Golden HTML for the board fragment, backed by hard
-assertions so a mis-generated golden cannot pass silently.
+and writes a manifest recording the slug of every page it emitted. Refuses to
+build route data behind a pre-baseline page.
+
+Route URLs come from the dataset's route_slugs map, never from a previous
+build: CI renders into a brand-new _site on an ephemeral runner every run, so a
+map read back from the site output would always be empty and published URLs
+would move. Pinned by a test that builds twice into two different fresh output
+directories and compares the URLs.
+
+Golden HTML for the board fragment, backed by hard assertions so a
+mis-generated golden cannot pass silently.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 '@
@@ -4690,7 +4865,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 - Test: `C:\Users\Alex\Projects\ghost-bus\tests\test_site_escaping.py`
 
 **Interfaces:**
-- Consumes: `build_site`, `esc`, `slugify`.
+- Consumes: `build_site` (Task 16), `esc`, `publish.slugs.slugify` (Task 7).
 - Produces: `class InjectionError(RuntimeError)`, `ALLOWED_TAGS: frozenset[str]`, `assert_inert(text: str, source: str = "") -> None`.
 
 Escaping is invisible when it breaks — a missing `esc()` produces a page that looks fine until someone hostile is in the timetable. So there are two independent guards. **Structural:** every emitted HTML file is parsed for tag names and any tag outside a fixed allowlist aborts the build; attribute-level checks are deliberately avoided, because a route legitimately named `x onerror=y` must not fail the build and, once escaped, cannot do anything. **Field-agnostic:** a single test asserts no hostile payload appears verbatim in any emitted file, which catches a missed `esc()` on *any* field including attribute-context payloads containing no `<`, which the structural guard cannot see. The hostile fixture covers the ranked, unranked and zero-trial render paths.
@@ -4709,7 +4884,8 @@ import pytest
 
 from tests.site_fixtures import daily_row, uptime_row, write_dataset
 
-from publish.site import InjectionError, assert_inert, build_site, slugify
+from publish.site import InjectionError, assert_inert, build_site
+from publish.slugs import slugify
 
 XSS_ID = "<script>alert(1)</script>"
 XSS_SHORT = '" onmouseover="alert(2)'
@@ -4744,7 +4920,15 @@ def hostile_dataset(tmp_path):
                          manifest={"coverage": {"first_day": "2026-06-28",
                                                 "last_day": "2026-06-28",
                                                 "complete_days": 28},
-                                   "unnamed_routes": [XSS_ID]})
+                                   "unnamed_routes": [XSS_ID],
+                                   # Published by the VM, hostile ids and all -
+                                   # the builder reads this map, so it is part
+                                   # of the untrusted input surface.
+                                   "route_slugs": {
+                                       XSS_ID: "script-alert-1-script",
+                                       "HOSTILE_TINY": "hostile-tiny",
+                                       "HOSTILE_BLIND": "hostile-blind",
+                                       "SAFE": "safe"}})
 
 
 def all_html(out):
@@ -4793,6 +4977,9 @@ def test_hostile_agency_name_is_escaped_on_the_route_page(tmp_path):
 
 
 def test_hostile_route_id_slugifies_to_a_safe_filename(tmp_path):
+    # The map now comes from the dataset; the hostile fixture publishes it, so
+    # a hostile route id has to survive the round trip through manifest.json
+    # and still land on a filename made only of [a-z0-9-].
     assert slugify(XSS_ID) == "script-alert-1-script"
     out = tmp_path / "_site"
     manifest = build_site(hostile_dataset(tmp_path), out)
@@ -4978,7 +5165,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 ### Task 18: VM publisher — dataset-only push to the data repository, systemd timer
 
-**Precondition:** `python -m publish.dataset --help` must list `--db` and `--data-dir` (and no `--commit`). If it does not, Task 8 is not done — stop.
+**Precondition:** `python -m publish.dataset --help` must list `--db` and `--data-dir` (and no `--commit`). If it does not, Task 9 is not done — stop.
 
 **Files:**
 - Create: `C:\Users\Alex\Projects\ghost-bus\ops\publish.sh`
@@ -4988,7 +5175,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 - Test: `C:\Users\Alex\Projects\ghost-bus\tests\test_publish_ops.py`
 
 **Interfaces:**
-- Consumes: `python -m publish.dataset --db <db_path> --data-dir <data_dir>` (Task 8; exits nonzero and writes nothing when the publish gate fails).
+- Consumes: `python -m publish.dataset --db <db_path> --data-dir <data_dir>` (Task 9; exits nonzero and writes nothing when the publish gate fails).
 - Consumes: the deployed layout used by `ops/ghostbus-classifier.service` — `WorkingDirectory=/opt/ghost-bus`, `EnvironmentFile=/etc/ghostbus.env`, interpreter `/opt/ghost-bus/.venv/bin/python`.
 - Produces: `ops/publish.sh` — the single VM entry point that generates the dataset and pushes it. Task 19's RUNBOOK documents installing and running exactly these files.
 
@@ -5507,7 +5694,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Test: `C:\Users\Alex\Projects\ghost-bus\tests\test_publish_docs.py` (create)
 
 **Interfaces:**
-- Consumes: `ops/publish.sh`, `ops/git-askpass.sh`, `ops/ghostbus-publisher.service`, `ops/ghostbus-publisher.timer` (Task 18); `.github/workflows/publish.yml` (Task 19); `data/manifest.json` field `scoreboard_ready` (Task 7).
+- Consumes: `ops/publish.sh`, `ops/git-askpass.sh`, `ops/ghostbus-publisher.service`, `ops/ghostbus-publisher.timer` (Task 18); `.github/workflows/publish.yml` (Task 19); `data/manifest.json` field `scoreboard_ready` (Task 8).
 - Produces: the operator procedure Task 21's README links to.
 
 - [ ] **Step 1: Write the failing test**
@@ -5957,7 +6144,7 @@ def test_attribution_appears_once(readme):
 
 Run: `cd C:\Users\Alex\Projects\ghost-bus; python -m pytest tests/test_publish_docs.py -q`
 
-Expected: FAIL — `9 passed, 7 failed`. `test_readme_has_a_scoreboard_section` fails with `AssertionError: assert '## The scoreboard & open data' in '# Ghost Bus Tracker...'`; the five section-backed tests fail with `ValueError: substring not found` from `section()`; `test_readme_tree_lists_the_new_packages` fails with `AssertionError: assert 'publish/' in ...`. `test_attribution_appears_once` passes already.
+Expected: FAIL — `10 passed, 7 failed`. `test_readme_has_a_scoreboard_section` fails with `AssertionError: assert '## The scoreboard & open data' in '# Ghost Bus Tracker...'`; the five section-backed tests fail with `ValueError: substring not found` from `section()`; `test_readme_tree_lists_the_new_packages` fails with `AssertionError: assert 'publish/' in ...`. `test_attribution_appears_once` passes already.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -6249,10 +6436,12 @@ route data exists):
   outcomes but absent from `gtfs_routes`. A short list is expected; a long one
   means the timetable loader and the classifier disagree about route ids.
 - **Slug stability.** Production route ids contain spaces (`03C 120 e a`), so
-  filenames are slugified, and the slug map is carried in the site manifest and
-  reused by the next build so published URLs do not move. The first build with
-  real ids is the first test of that; check `route_slugs` in the deployed
-  manifest against the route pages actually emitted.
+  filenames are slugified, and the slug map is carried in the *dataset*
+  manifest — written by the VM, checked out by CI — so published URLs do not
+  move even though the site is rebuilt from scratch on a fresh runner every
+  run. The first build with real ids is the first test of that; check
+  `route_slugs` in `data/manifest.json` against the route pages actually
+  emitted.
 - **Ranking sanity.** Confirm the top entries are routes with real sample sizes
   and that the 30-judged-trip gate is visibly separating "ranked" from "not
   enough data yet". A route appearing high with a small "Trips judged" figure

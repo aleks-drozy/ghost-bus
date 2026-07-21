@@ -3,6 +3,9 @@ Description=Ghost Bus classifier pass
 
 [Service]
 Type=oneshot
+# All three ghostbus units (poller, classifier, publisher) run as ubuntu,
+# deliberately - see ghostbus-poller.service's comment for why.
+User=ubuntu
 WorkingDirectory=/opt/ghost-bus
 EnvironmentFile=/etc/ghostbus.env
 ExecStart=/opt/ghost-bus/.venv/bin/python -m classify.run_classifier

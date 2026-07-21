@@ -132,12 +132,42 @@ points in the repo as of Phase 2 (`python -m ingest.run_poller`,
 `ingest.poller` / `classify.outcomes` modules with production wiring
 (`NTA_API_KEY`, the shared WAL-mode SQLite connection, agency scoping).
 
+**All three units — poller, classifier, and publisher — run as `ubuntu`
+(`User=ubuntu`), deliberately.** This is a decision, not an oversight: do not
+"fix" one of them back to root, even if it looks unnecessary in isolation.
+`User=ubuntu` started on the publisher specifically to shrink the blast
+radius of the one credential able to write to GitHub, and was extended to
+all three so that every process touching the shared `state/ghostbus.db`
+(WAL mode) has the same owner as the checkout itself — a live test showed
+an `ubuntu` reader could in fact read a database with root-owned `-wal`/`-shm`
+files being actively written by a root poller, but resting the one
+GitHub-writing component's correctness on an unexplained, empirically
+observed (not verified-by-understanding) cross-UID access pattern was judged
+not worth it. One owner removes the question.
+
 ```bash
 sudo cp /opt/ghost-bus/ops/ghostbus-poller.service /etc/systemd/system/
 sudo cp /opt/ghost-bus/ops/ghostbus-classifier.service /etc/systemd/system/
 sudo cp /opt/ghost-bus/ops/ghostbus-classifier.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 ```
+
+**On an existing install** (poller/classifier already running as root before
+this change), a one-time ownership fix is required — and is not, by itself,
+enough:
+
+```bash
+sudo systemctl stop ghostbus-poller.service ghostbus-classifier.service
+sudo chown -R ubuntu:ubuntu /opt/ghost-bus/state
+```
+
+The one-shot `chown` fixes the files that exist *right now*. It is not
+sufficient on its own: the poller has been recreating root-owned
+`state/*` files (the SQLite file itself, and its `-wal`/`-shm` companions)
+on every restart, since it ran as root and any file it creates is
+root-owned. Installing the updated unit (with `User=ubuntu`) and reloading
+systemd — the steps above and below — is what makes the ownership actually
+stick, by changing which account creates those files going forward.
 
 ### 2.3 Enable and start
 

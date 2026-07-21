@@ -16,6 +16,14 @@ Type=oneshot
 # on this VM that can write to GitHub. EnvironmentFile is still read by
 # systemd itself before the process starts, so /etc/ghostbus.env staying
 # root:root mode 600 is unaffected.
+#
+# ghostbus-poller.service and ghostbus-classifier.service also run as
+# ubuntu, deliberately, not just this unit: a live test showed root-owned
+# WAL/SHM files were in fact readable by an ubuntu reader, but an
+# unexplained empirical result about mixed-UID access to a shared SQLite
+# database is a bad foundation for the one component holding a repo-write
+# credential - all three sharing one owner removes the question rather than
+# resting on it.
 User=ubuntu
 WorkingDirectory=/opt/ghost-bus
 EnvironmentFile=/etc/ghostbus.env

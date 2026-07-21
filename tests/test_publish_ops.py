@@ -27,6 +27,7 @@ ASKPASS_SH = OPS / "git-askpass.sh"
 SERVICE = OPS / "ghostbus-publisher.service"
 TIMER = OPS / "ghostbus-publisher.timer"
 CLASSIFIER = OPS / "ghostbus-classifier.service"
+POLLER = OPS / "ghostbus-poller.service"
 
 TOKEN_VAR = "GHOSTBUS_PUBLISH_TOKEN"
 
@@ -202,6 +203,21 @@ def test_service_runs_as_ubuntu_not_root():
     """
     text = SERVICE.read_text(encoding="utf-8")
     assert "User=ubuntu" in text
+
+
+def test_all_three_ghostbus_units_run_as_the_same_user():
+    """NEW-6: a reviewer argued (without reproducing it) that User=ubuntu on
+    the publisher alone would break its read access to the poller/
+    classifier's root-owned WAL-mode SQLite files. A live test found that
+    premise empirically false - but resting the one component with a
+    repo-write credential on an unexplained cross-UID access pattern was
+    judged not worth it regardless of whether it currently happens to work.
+    All three units now share one owner, deliberately, so nobody "fixes" one
+    of them back to root and reintroduces the question.
+    """
+    for path in (SERVICE, CLASSIFIER, POLLER):
+        text = path.read_text(encoding="utf-8")
+        assert "User=ubuntu" in text, path.name
 
 
 def test_timer_runs_once_a_day_after_the_service_day_closes():

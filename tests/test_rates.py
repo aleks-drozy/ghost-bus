@@ -101,3 +101,20 @@ def test_z_is_configurable_and_wider_z_gives_wider_interval():
     lo95, hi95 = wilson_interval(2, 30)
     lo99, hi99 = wilson_interval(2, 30, z=2.576)
     assert (hi99 - lo99) > (hi95 - lo95)
+
+
+def test_zero_successes_gives_exactly_zero_for_problematic_n_values():
+    # Floating-point precision issue: for k=0, centre - margin can be ~1e-17
+    # instead of exactly 0.0 for certain n values. Explicit clamping is required.
+    for n in (11, 22, 27):
+        lo, hi = wilson_interval(0, n)
+        assert lo == 0.0, f"Expected exactly 0.0 for n={n}, got {repr(lo)}"
+
+
+def test_all_successes_gives_exactly_one_for_problematic_n_values():
+    # Floating-point precision issue: for k=n, centre + margin can be slightly
+    # less than 1.0 (e.g., 0.9999999999999999) instead of exactly 1.0 for
+    # certain n values. Explicit clamping is required.
+    for n in (6, 21, 31, 38):
+        lo, hi = wilson_interval(n, n)
+        assert hi == 1.0, f"Expected exactly 1.0 for n={n}, got {repr(hi)}"

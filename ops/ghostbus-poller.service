@@ -4,6 +4,15 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# All three ghostbus units (poller, classifier, publisher) run as ubuntu,
+# deliberately, so the checkout and every process touching it share one
+# owner - this is a decision, not an oversight, so nobody "fixes" it back to
+# root on just one of the three and reintroduces mixed-UID access to the
+# shared SQLite database (see ghostbus-publisher.service for the fuller
+# story - User=ubuntu started there for the publisher's blast radius, and
+# was extended to all three to remove reliance on an unexplained,
+# empirically-observed-but-unverified WAL-mode cross-UID access pattern).
+User=ubuntu
 WorkingDirectory=/opt/ghost-bus
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/ghostbus.env

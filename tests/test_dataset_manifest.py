@@ -20,7 +20,7 @@ def test_manifest_has_exactly_the_spec_keys(tmp_path):
     manifest = read_manifest(tmp_path)
     assert list(manifest) == ["schema_version", "generated_at", "timetable_hash",
                               "timetable_loaded_at", "coverage", "scoreboard_ready",
-                              "baseline_required_days", "gate", "counts",
+                              "baseline_required_days", "gate", "agencies", "counts",
                               "unnamed_routes", "route_slugs"]
     assert list(manifest["coverage"]) == ["first_day", "last_day", "complete_days"]
     assert list(manifest["gate"]) == ["conservation", "rates_bounded",
@@ -29,7 +29,11 @@ def test_manifest_has_exactly_the_spec_keys(tmp_path):
                                         "trips_classified"]
 
 
-def test_manifest_values_for_a_single_complete_day(tmp_path):
+def test_manifest_values_for_a_single_complete_day(tmp_path, monkeypatch):
+    # The agency allow-list is read from the environment (ghostbus_config),
+    # not from this test's fixture db - unset it so the assertion below is
+    # the documented default regardless of the host shell's environment.
+    monkeypatch.delenv("GHOSTBUS_AGENCIES", raising=False)
     db = build_db()
     write_dataset(db, tmp_path, today=dt.date(2026, 3, 24), now_utc=FIXED_NOW)
     assert read_manifest(tmp_path) == {
@@ -43,6 +47,7 @@ def test_manifest_values_for_a_single_complete_day(tmp_path):
         "baseline_required_days": 14,
         "gate": {"conservation": True, "rates_bounded": True,
                  "outcomes_valid": True},
+        "agencies": ["Dublin Bus", "Go-Ahead Ireland"],
         "counts": {"observations": 3, "snapshots": 3, "trips_classified": 13},
         "unnamed_routes": ["03C 120 e a"],
         "route_slugs": {"03C 120 e a": "03c-120-e-a", "R1": "r1", "R2": "r2"},

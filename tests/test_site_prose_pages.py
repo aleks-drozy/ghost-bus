@@ -117,6 +117,24 @@ def test_about_data_says_none_when_no_unnamed_routes(tmp_path):
     assert "None" in html
 
 
+def test_about_data_states_the_configured_operators(tmp_path):
+    # scheduled_trips (timetable/gtfs.py) only ever schedules trips for the
+    # configured agency allow-list - "every scheduled trip" elsewhere on the
+    # site means every trip of THESE operators, not every bus in the country.
+    data = write_dataset(tmp_path / "data")
+    html = render_about_data(SITE_DIR, DEFAULT_MANIFEST, data)
+    assert "Operators in scope" in html
+    assert "Dublin Bus" in html and "Go-Ahead Ireland" in html
+
+
+def test_about_data_agencies_falls_back_when_none_configured(tmp_path):
+    data = write_dataset(tmp_path / "data")
+    manifest = dict(DEFAULT_MANIFEST)
+    manifest["agencies"] = []
+    html = render_about_data(SITE_DIR, manifest, data)
+    assert "none configured" in html
+
+
 def test_about_data_carries_tfi_nta_attribution(tmp_path):
     data = write_dataset(tmp_path / "data")
     html = render_about_data(SITE_DIR, DEFAULT_MANIFEST, data)

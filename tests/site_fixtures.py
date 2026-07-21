@@ -27,6 +27,7 @@ DEFAULT_MANIFEST = {
     "scoreboard_ready": True,
     "baseline_required_days": 14,
     "gate": {"conservation": True, "rates_bounded": True, "outcomes_valid": True},
+    "agencies": ["Dublin Bus", "Go-Ahead Ireland"],
     "counts": {"observations": 128400, "snapshots": 40320, "trips_classified": 9111},
     "unnamed_routes": [],
     # The published route-id -> slug map. Empty here so each test states the

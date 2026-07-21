@@ -7,17 +7,24 @@ committing and pushing is ops/publish.sh's job.
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import datetime as dt
 import json
 import shutil
 import sqlite3
+import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from aggregate.rollup import route_day_rollup
+from ghostbus_config import get_db
 from publish.slugs import slug_map
 from run_checks import check_conservation, check_outcomes_valid, check_rates_bounded
+
+
+class GateFailed(Exception):
+    """The publish gate did not pass, so nothing at all was written."""
 
 SCHEMA_VERSION = 1
 BASELINE_REQUIRED_DAYS = 14
@@ -356,7 +363,13 @@ def write_dataset(db: sqlite3.Connection, data_dir, *,
     data_dir = Path(data_dir)
     today = local_today() if today is None else today
     now_utc = dt.datetime.now(UTC) if now_utc is None else now_utc
+    # The gate runs before the first mkdir: a failed gate must leave the
+    # previously published dataset in place, untouched, rather than replace it
+    # with numbers nothing has verified.
     gate = run_gate(db)
+    if not all(gate.values()):
+        failed = ", ".join(sorted(k for k, ok in gate.items() if not ok))
+        raise GateFailed(failed)
     names = route_names(db)
     days = complete_service_days(db, today)
     # Read the previous map BEFORE write_manifest overwrites it below.
@@ -380,3 +393,33 @@ def write_dataset(db: sqlite3.Connection, data_dir, *,
     manifest = build_manifest(db, days, gate, names, slugs, now_utc)
     write_manifest(data_dir, manifest)
     return manifest
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Write the dataset, or write nothing and exit 1.
+
+    This CLI never invokes git. ops/publish.sh commits and pushes; keeping the
+    two apart is what lets a gate failure stop the run before any repository is
+    touched at all.
+    """
+    parser = argparse.ArgumentParser(
+        description="Publish the Ghost Bus dataset from SQLite to CSV + manifest.")
+    parser.add_argument("--db", default="state/ghostbus.db",
+                        help="path to the SQLite database (default: state/ghostbus.db)")
+    parser.add_argument("--data-dir", default="data",
+                        help="directory to write into (default: data)")
+    args = parser.parse_args(argv)
+    db = get_db(args.db)
+    try:
+        manifest = write_dataset(db, Path(args.data_dir))
+    except GateFailed as exc:
+        print(f"FAIL publish gate: {exc}", file=sys.stderr)
+        print("wrote nothing", file=sys.stderr)
+        return 1
+    print(f"published {manifest['coverage']['complete_days']} complete days, "
+          f"scoreboard_ready={manifest['scoreboard_ready']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

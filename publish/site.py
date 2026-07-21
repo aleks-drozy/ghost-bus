@@ -11,6 +11,7 @@ import csv
 import datetime as dt
 import html
 import json
+import math
 import re
 from pathlib import Path
 from string import Template
@@ -90,17 +91,51 @@ def render_page(site_dir, *, title: str, root: str, current: str,
     )
 
 
-def _to_int(value) -> int:
+def _to_int(value, *, path, column) -> int:
+    """A count must be a non-negative integer, or blank (meaning zero).
+
+    These files are machine-written by our own publisher and validated by the
+    publish gate before they are written, so a value outside that shape means
+    the file is corrupt or truncated. Raising with the file and column named
+    is the honest outcome; silently clamping or skipping would let a corrupt
+    file render a plausible-looking number on a public accountability page.
+    """
     if value in ("", None):
         return 0
-    return int(value)
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{path}: column '{column}' has a non-integer count {value!r}"
+        ) from exc
+    if number < 0:
+        raise ValueError(f"{path}: column '{column}' has a negative count {value!r}")
+    return number
 
 
-def _to_float(value) -> float | None:
-    """Blank means undefined, and undefined is never 0.0 (spec failure table)."""
+def _to_float(value, *, path, column) -> float | None:
+    """Blank means undefined, and undefined is never 0.0 (spec failure table).
+
+    Anything else must be a finite rate in [0.0, 1.0]. As with _to_int, these
+    files are machine-written by our own publisher and gate-validated before
+    being written, so a value outside that range (e.g. an unbounded exponent
+    like "1e999", which float() happily turns into inf with no exception, or a
+    rate above 1.0) means the file is corrupt or truncated -- not a rate we
+    should render.
+    """
     if value in ("", None):
         return None
-    return float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{path}: column '{column}' has a non-numeric rate {value!r}"
+        ) from exc
+    if not math.isfinite(number) or not (0.0 <= number <= 1.0):
+        raise ValueError(
+            f"{path}: column '{column}' has a rate outside [0.0, 1.0]: {value!r}"
+        )
+    return number
 
 
 def read_manifest(data_dir) -> dict:
@@ -112,6 +147,12 @@ def read_daily(data_dir) -> list[dict]:
 
     An absent daily/ directory is not an error: before the 14-day baseline the
     publisher writes none, and that is the documented state of the dataset.
+
+    route_id, route_short_name, route_long_name and agency_name come back as
+    raw, unescaped strings straight from GTFS -- external data from the
+    transit operator, not from us. This reader does not escape anything; any
+    later code that renders one of these four fields into HTML must pass it
+    through esc() at the point of rendering.
     """
     directory = Path(data_dir) / "daily"
     if not directory.is_dir():
@@ -122,9 +163,9 @@ def read_daily(data_dir) -> list[dict]:
             for raw in csv.DictReader(fh):
                 row = dict(raw)
                 for field in COUNT_FIELDS:
-                    row[field] = _to_int(row.get(field))
+                    row[field] = _to_int(row.get(field), path=path, column=field)
                 for field in RATE_FIELDS:
-                    row[field] = _to_float(row.get(field))
+                    row[field] = _to_float(row.get(field), path=path, column=field)
                 rows.append(row)
     return rows
 
@@ -138,8 +179,14 @@ def read_uptime(data_dir) -> list[dict]:
         with path.open(newline="", encoding="utf-8") as fh:
             for raw in csv.DictReader(fh):
                 row = dict(raw)
-                row["expected_minutes"] = _to_int(row.get("expected_minutes"))
-                row["ok_minutes"] = _to_int(row.get("ok_minutes"))
-                row["uptime_fraction"] = _to_float(row.get("uptime_fraction"))
+                row["expected_minutes"] = _to_int(
+                    row.get("expected_minutes"), path=path, column="expected_minutes"
+                )
+                row["ok_minutes"] = _to_int(
+                    row.get("ok_minutes"), path=path, column="ok_minutes"
+                )
+                row["uptime_fraction"] = _to_float(
+                    row.get("uptime_fraction"), path=path, column="uptime_fraction"
+                )
                 rows.append(row)
     return rows

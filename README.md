@@ -81,7 +81,7 @@ concentrated late at night and unevenly split between operators. Until G2
 the classifier timed every report by our fetch time (`ts_utc`), so a
 republished position could keep a silent bus "alive" into the completion
 window — an operator-flattering error, quantified before it was fixed
-(design and full numbers: `docs/superpowers/specs/2026-07-22-staleness-design.md`).
+(design and full numbers: `docs/specs/2026-07-22-staleness.md`).
 
 G2 sets **no staleness threshold** — the measured exposure declines
 smoothly under any candidate cutoff, with no knee, so every constant would
@@ -164,8 +164,8 @@ python -m pytest
 ```
 
 Tests never touch the network — the classifier, aggregates, and publish
-gate are all exercised against a synthetic "Fixtureville" GTFS network (2
-routes, ~40 trips, including a past-midnight trip and a DST-boundary day),
+gate are all exercised against a synthetic "Fixtureville" GTFS network (3
+routes, 19 trips, including a past-midnight trip and a DST-boundary day),
 plus real GTFS-Realtime protobufs built in-process.
 
 ## Status
@@ -291,11 +291,11 @@ third-party requests at all.
 
 ## Docs
 
-- [Design spec](docs/superpowers/specs/2026-07-18-ghost-bus-design.md) — the
+- [Design spec](docs/specs/2026-07-18-ghost-bus.md) — the
   full methodology, scope, risks, and honesty notes; normative for the
   taxonomy above.
-- [Core implementation plan](docs/superpowers/plans/2026-07-18-ghost-bus-core.md) —
-  the task-by-task TDD plan that built the pipeline in this repo.
+- [Amendment specs](docs/specs/) — the dated design amendments (G1 geo-progress,
+  G2 staleness, G3 feed health), each committed before the code it governs.
 - [Ops runbook](ops/RUNBOOK.md) — provisioning, install, health checks, and
   recovery procedures for the production VM.
 

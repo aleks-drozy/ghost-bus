@@ -3,7 +3,7 @@
 **Date:** 2026-07-22
 **Status:** ACCEPTED — Option D chosen by Alex 2026-07-22; implemented same
 day (TDD, `classify/outcomes.py` + 7 tests; plan:
-`docs/superpowers/plans/2026-07-22-staleness-g2.md`; deploy + baseline
+deploy + baseline
 reclassification: RUNBOOK §9, blocked on the P4 owner steps)
 **Depends on:** G1 (`2026-07-19-geo-progress-design.md`), vehicle_ts capture
 (merged `1164011`), RUNBOOK §6 burn-in measurements
@@ -211,7 +211,7 @@ Residual risks, stated honestly:
 ## What this doc does NOT do
 
 No code changes, no threshold constants in config, no reclassification.
-Implementation is its own TDD plan (`docs/superpowers/plans/`) after Alex
+Implementation follows this spec after Alex
 reviews this design. Estimated implementation surface if D is chosen:
 `classify/outcomes.py` (last_ts + pre-start gate), `classify/store.py`
 (query columns), tests (Fixtureville gains vehicle_ts fixtures; regression

@@ -76,3 +76,22 @@ def test_counts_conserve_totals(db):
 def test_hour_rollup_uses_local_hour(db):
     hours = {(r["route_id"], r["local_hour"]): r for r in route_hour_rollup(db)}
     assert ("R1", 7) in hours and hours[("R1", 7)]["scheduled"] == 2
+
+
+def test_excluded_feed_is_counted_and_removed_from_the_denominator(db):
+    # Amendment G3: EXCLUDED_FEED trips (feed degraded - NTA's failure, not
+    # ours and not the operator's) leave the denominator exactly like
+    # EXCLUDED does. R1 gains two: denominator 5+2 scheduled - 1 excluded -
+    # 2 excluded_feed = 4, so both rates are unchanged by the shield.
+    db.executemany("INSERT INTO trip_outcomes VALUES (?,?,?,?,?)", [
+        ("g", "2026-03-23", "R1", "2026-03-23T09:30:00+00:00", "EXCLUDED_FEED"),
+        ("h", "2026-03-23", "R1", "2026-03-23T10:00:00+00:00", "EXCLUDED_FEED"),
+    ])
+    db.commit()
+    r1 = next(r for r in route_day_rollup(db) if r["route_id"] == "R1")
+    assert r1["scheduled"] == 7 and r1["excluded_feed"] == 2
+    assert r1["vanished_rate"] == pytest.approx(1 / 4)
+    assert r1["untracked_rate"] == pytest.approx(1 / 4)
+    parts = (r1["excluded"] + r1["excluded_feed"] + r1["cancelled"]
+             + r1["completed"] + r1["vanished"] + r1["untracked"])
+    assert parts == r1["scheduled"]

@@ -30,7 +30,8 @@ def test_ranked_table_lists_routes_worst_lower_bound_first():
 def test_every_ranked_row_shows_its_sample_size():
     html = build([one_day("R1", 40, excluded=10, vanished=3)])
     assert "Trips judged" in html
-    assert 'title="40 scheduled, 10 excluded"' in html
+    assert ('title="40 scheduled, 10 excluded (tracker down), '
+            '0 excluded (feed degraded)"') in html
     assert ">30<" in html
 
 

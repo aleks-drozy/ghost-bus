@@ -3,7 +3,7 @@
 <p class="meta">Route id <code>${route_id}</code> · ${agency} · ${rank_line}</p>
 <h2>${window_heading}</h2>
 <dl class="facts">
-<dt>Trips judged</dt><dd>${trials} of ${scheduled} scheduled (${excluded} excluded because we were not watching)</dd>
+<dt>Trips judged</dt><dd>${trials} of ${scheduled} scheduled (${excluded} excluded because we were not watching, ${excluded_feed} because the feed itself was degraded)</dd>
 <dt>Vanished — a vehicle was seen and then stopped reporting mid-route</dt><dd>${vanished_count} trips, ${vanished_rate} (95% interval ${vanished_interval})</dd>
 <dt>Untracked — no vehicle was ever seen, which is not the same as “did not run”</dt><dd>${untracked_count} trips, ${untracked_rate} (95% interval ${untracked_interval})</dd>
 <dt>Cancelled by the operator</dt><dd>${cancelled} trips</dd>

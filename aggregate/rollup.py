@@ -7,7 +7,8 @@ from zoneinfo import ZoneInfo
 
 from aggregate.rates import rate_with_interval
 
-_CLASSES = ("EXCLUDED", "CANCELLED", "COMPLETED", "VANISHED", "UNTRACKED")
+_CLASSES = ("EXCLUDED", "CANCELLED", "COMPLETED", "VANISHED", "UNTRACKED",
+            "EXCLUDED_FEED")
 
 # The two published rates, each with its Wilson bounds. VANISHED and UNTRACKED
 # are different claims about the world and are never summed (design decision
@@ -19,13 +20,15 @@ RATE_KEYS = ("vanished_rate", "vanished_lo", "vanished_hi",
 
 
 def _rates(counts: dict) -> dict:
-    """Both rates over the same denominator: scheduled - excluded.
+    """Both rates over the same denominator: scheduled - excluded - excluded_feed.
 
-    Tracker downtime (EXCLUDED) never counts against the operator. When the
-    denominator is <= 0 every rate field is None - all six together, never a
-    mix - because an undefined rate must not be reported as 0.0.
+    Tracker downtime (EXCLUDED) and feed degradation (EXCLUDED_FEED,
+    amendment G3) never count against the operator - the denominator is the
+    trips we could actually judge. When it is <= 0 every rate field is None -
+    all six together, never a mix - because an undefined rate must not be
+    reported as 0.0.
     """
-    denom = counts["scheduled"] - counts["excluded"]
+    denom = counts["scheduled"] - counts["excluded"] - counts["excluded_feed"]
     out: dict = {}
     for kind in _RATED:
         result = rate_with_interval(counts[kind], denom)

@@ -11,7 +11,8 @@ from classify.outcomes import OUTCOMES
 def check_conservation(db: sqlite3.Connection) -> dict:
     bad = []
     for r in route_day_rollup(db):
-        parts = r["excluded"] + r["cancelled"] + r["completed"] + r["vanished"] + r["untracked"]
+        parts = (r["excluded"] + r["excluded_feed"] + r["cancelled"]
+                 + r["completed"] + r["vanished"] + r["untracked"])
         if parts != r["scheduled"]:
             bad.append(r)
     return {"check": "conservation", "passed": not bad, "violations": bad}

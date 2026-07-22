@@ -72,6 +72,38 @@ def test_run_for_dates_handles_no_scheduled_trips(db):
     assert summary["2026-03-22"] == {}
 
 
+def test_run_for_dates_wires_feed_shields_into_classification(db, monkeypatch):
+    # G3 wiring: run_for_dates must build the route->agency map, call
+    # compute_shields, and thread both into classify_day - a shield that
+    # exists but is never wired would silently re-enable accusations during
+    # feed outages. Fixtureville's fleet (<= 18 active) sits below
+    # MIN_ACTIVE_TRIPS by design, so arming is faked here; the real arming
+    # math is covered in test_feedhealth.py.
+    import classify.run_classifier as rc
+    _fill_heartbeats(db, dt.datetime(2026, 3, 23, 6, 0, tzinfo=UTC),
+                     dt.datetime(2026, 3, 24, 2, 0, tzinfo=UTC))
+
+    seen = {}
+
+    def fake_shields(db_, trips, agency_of_route):
+        seen["agency_map"] = dict(agency_of_route)
+        whole_day = (dt.datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+                     dt.datetime(2026, 3, 24, 6, 0, tzinfo=UTC))
+        return {agency: [whole_day] for agency in set(agency_of_route.values())}
+
+    monkeypatch.setattr(rc, "compute_shields", fake_shields)
+    now_utc = dt.datetime(2026, 3, 24, 2, 0, tzinfo=UTC)
+    summary = run_for_dates(db, [dt.date(2026, 3, 23)],
+                            agency_names={"Fixtureville Bus"}, now_utc=now_utc)
+    counts = summary["2026-03-23"]
+    assert counts.get("UNTRACKED", 0) == 0
+    assert counts["EXCLUDED_FEED"] == 16  # every would-be-UNTRACKED trip shielded
+    assert seen["agency_map"].get("R1") == "Fixtureville Bus"
+    (stored,) = db.execute(
+        "SELECT COUNT(*) FROM trip_outcomes WHERE outcome='EXCLUDED_FEED'").fetchone()
+    assert stored == 16
+
+
 def test_run_for_dates_multiple_dates_are_independent(db):
     _fill_heartbeats(db, dt.datetime(2026, 3, 27, 6, 0, tzinfo=UTC),
                      dt.datetime(2026, 3, 29, 2, 0, tzinfo=UTC))

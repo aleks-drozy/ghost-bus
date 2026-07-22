@@ -1191,3 +1191,51 @@ anything.
 - §6.4 frozen-clock watch shows no material trend.
 - The 2026-07-21 feed-degradation day (§6.3) remains contaminated
   regardless of G2 — its handling is the G3 decision, not this one.
+
+---
+
+## 10. Upgrade to the feed-health gate (G3, 2026-07-22)
+
+> Methodology amendment, deployed together with §9 (G2): both change
+> classification only, so one `git pull` and ONE reclassification pass
+> covers the pair. No schema change, no config change, no unit-file change,
+> no new index - detection reuses the same per-trip index classification
+> already uses.
+
+**Blocked until the P4 owner steps (§8.1) are done and main is pushed.**
+
+### 10.1 Deploy
+
+Covered by §9.1's `git pull`. The classifier's next timer run computes
+feed-health shields automatically; `run_for_dates` wires them in.
+
+### 10.2 Reclassify
+
+Run §9.2 once, after pulling code that contains BOTH amendments - do not
+run it between them. Expected additional movement from G3: on
+**2026-07-21** roughly 200-300 VANISHED/UNTRACKED trips in the
+18:00-20:30 window become EXCLUDED_FEED (the incident that motivated the
+amendment); other days should move little or not at all. That day is
+withdrawn from publication regardless (WITHDRAWN_DAYS in
+publish/dataset.py), so the reclassification is for the database's own
+honesty, not for the published record.
+
+### 10.3 Verify
+
+- `run_checks.py` passes (conservation now sums six classes).
+- Spot-check 2026-07-21 evening:
+
+```bash
+sqlite3 -readonly /opt/ghost-bus/state/ghostbus.db "
+SELECT outcome, COUNT(*) FROM trip_outcomes
+WHERE service_date='2026-07-21' GROUP BY outcome;"
+```
+
+  EXCLUDED_FEED should be in the low hundreds; VANISHED should fall back
+  to the same order as the surrounding days (60-120).
+- The published dataset shows no `daily/2026-07-21.csv`, and the manifest
+  lists the day under `withdrawn_days` with its reason.
+- §6.3's feed-volume watch remains the *diagnostic* view; the gate is the
+  *automatic* consequence. If §6.3 ever shows a V-shape the gate did not
+  catch, that is a parameter-fit finding - record it in the vault and
+  revisit the constants by commit, not by env var.

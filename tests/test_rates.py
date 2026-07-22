@@ -190,9 +190,9 @@ def test_no_published_field_equals_the_sum_of_the_two_rates():
     # casually change the trip counts without re-verifying.
     # Skip outcome-count keys (vanished, untracked, completed, etc.) and identifiers.
     outcome_keys = {"vanished", "untracked", "completed", "cancelled", "scheduled", "excluded",
-                    "route_id", "service_date", "local_hour"}
+                    "excluded_feed", "route_id", "service_date", "local_hour"}
     for row in route_day_rollup(_invariant_db()):
-        denom = row["scheduled"] - row["excluded"]
+        denom = row["scheduled"] - row["excluded"] - row["excluded_feed"]
         if denom <= 0:
             for key in RATE_KEYS:
                 assert row[key] is None, key

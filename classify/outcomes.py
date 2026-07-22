@@ -9,6 +9,15 @@ VANISHED   observed, then silent with progress < 75% and > 15 min still to run
 UNTRACKED  no VEHICLE observation in the window (TripUpdate predictions alone do
            not prove a bus exists - predictions-without-a-vehicle is exactly the
            commuter's ghost)
+EXCLUDED_FEED  (amendment G3, 2026-07-22) the trip would classify VANISHED or
+           UNTRACKED, but the FEED itself was degraded for this operator over
+           the trip's window (classify/feedhealth.py): position volume
+           collapsed at fleet scale, so trip-level silence is not evidence
+           about this bus. Not operator blame, not tracker downtime - NTA's
+           failure, named as such. The shield only ever converts the two
+           accusatory classes; COMPLETED and CANCELLED are never touched
+           (evidence that exists still counts), and EXCLUDED takes precedence
+           (our downtime is reported as ours).
 
 Amendment G2 (2026-07-22): a position ping is evidence of the moment the
 VEHICLE reported (vehicle_ts), not the moment we fetched it (ts_utc) - the
@@ -32,7 +41,8 @@ from classify.progress import matched_max_seq
 from classify.store import uptime
 from timetable.gtfs import ScheduledTrip
 
-OUTCOMES = ("EXCLUDED", "CANCELLED", "COMPLETED", "VANISHED", "UNTRACKED")
+OUTCOMES = ("EXCLUDED", "CANCELLED", "COMPLETED", "VANISHED", "UNTRACKED",
+            "EXCLUDED_FEED")
 
 _OUTCOMES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS trip_outcomes (
@@ -58,8 +68,20 @@ def _trip_stop_coords(db: sqlite3.Connection, trip_id: str) -> list[tuple[int, f
         raise
 
 
+def _feed_degraded(trip: ScheduledTrip, shields: dict | None,
+                   agency_of_route: dict | None) -> bool:
+    """Does any degraded interval for this trip's operator overlap its window?"""
+    if not shields or not agency_of_route:
+        return False
+    intervals = shields.get(agency_of_route.get(trip.route_id), ())
+    return any(start < trip.window_end_utc and end > trip.window_start_utc
+               for start, end in intervals)
+
+
 def classify_trip(db: sqlite3.Connection, trip: ScheduledTrip,
-                  radius_m: float = 250.0) -> str:
+                  radius_m: float = 250.0,
+                  shields: dict | None = None,
+                  agency_of_route: dict | None = None) -> str:
     if uptime(db, trip.window_start_utc, trip.window_end_utc) < 0.90:
         return "EXCLUDED"
     rows = db.execute(
@@ -71,8 +93,14 @@ def classify_trip(db: sqlite3.Connection, trip: ScheduledTrip,
         return "CANCELLED"
     tracked = [(ts, seq, lat, lon, vts)
                for ts, kind, seq, lat, lon, vts in rows if kind == "position"]
+    # Amendment G3: the shield converts ONLY the two accusatory classes, at
+    # their return points - a degraded feed makes trip-level silence
+    # unusable as evidence against the operator, but evidence that exists
+    # (COMPLETED, CANCELLED) still counts, and EXCLUDED has already returned
+    # above (our downtime is reported as ours, never as NTA's).
     if not tracked:
-        return "UNTRACKED"
+        return "EXCLUDED_FEED" if _feed_degraded(trip, shields, agency_of_route) \
+            else "UNTRACKED"
     # Evidence clock (amendment G2): min(vehicle_ts, ts_utc), ts_utc when
     # vehicle_ts is NULL. Parse before comparing - string order breaks if
     # timestamp formats ever vary. A malformed vehicle_ts raises: the poller
@@ -106,14 +134,17 @@ def classify_trip(db: sqlite3.Connection, trip: ScheduledTrip,
     if progress >= 0.90 or last_ts >= trip.end_utc - dt.timedelta(minutes=10):
         return "COMPLETED"
     if progress < 0.75 and last_ts < trip.end_utc - dt.timedelta(minutes=15):
-        return "VANISHED"
+        return "EXCLUDED_FEED" if _feed_degraded(trip, shields, agency_of_route) \
+            else "VANISHED"
     # Residual: neither clearly completed nor vanished (incl. any-progress trips last
     # seen 10-15 min before scheduled end) - benefit of the doubt goes to the operator.
     return "COMPLETED"
 
 
 def classify_day(db: sqlite3.Connection, trips: list[ScheduledTrip],
-                 now_utc: dt.datetime, radius_m: float = 250.0) -> dict[str, str]:
+                 now_utc: dt.datetime, radius_m: float = 250.0,
+                 shields: dict | None = None,
+                 agency_of_route: dict | None = None) -> dict[str, str]:
     db.executescript(_OUTCOMES_SCHEMA)
     results: dict[str, str] = {}
     rows: list[tuple] = []
@@ -123,7 +154,7 @@ def classify_day(db: sqlite3.Connection, trips: list[ScheduledTrip],
     for trip in trips:
         if trip.window_end_utc > now_utc:
             continue
-        outcome = classify_trip(db, trip, radius_m)
+        outcome = classify_trip(db, trip, radius_m, shields, agency_of_route)
         results[trip.trip_id] = outcome
         rows.append((trip.trip_id, str(trip.service_date), trip.route_id,
                      trip.start_utc.isoformat(), outcome))

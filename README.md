@@ -29,6 +29,7 @@ window = scheduled start − 5 min → scheduled end + 15 min.
 | COMPLETED | observed, and the highest stop-sequence progress reached across *all* reports (feed `stop_sequence` merged with our geographic match by taking the maximum, never the last report alone) is ≥ 90% of the trip, OR the last *evidence* we have — timed by the vehicle's own report clock, not our fetch time (amendment G2) — is at or after 10 minutes before the scheduled end — one-sided, so any report after the scheduled end also satisfies this |
 | VANISHED | observed, then no evidence for the rest of the window (again on the vehicle's own clock, G2) with progress < 75% and > 15 min left — tracked, then gone mid-route |
 | UNTRACKED | zero vehicle *position* observations in the whole window (uptime ≥ 90%) — the classic ghost. A TripUpdate prediction alone is not proof a vehicle exists, so a trip with TripUpdate rows and no position ping is still untracked. Reported as *untracked*, not "did not run": a dead telematics unit looks identical to a bus that never left the depot, and we say so |
+| EXCLUDED_FEED | the trip would classify VANISHED or UNTRACKED, but the *feed itself* was degraded for this operator over the trip's window (amendment G3): position reporting collapsed at fleet scale, so trip-level silence proves nothing about this bus. Not operator blame, not tracker downtime — NTA's failure, named as such, and out of both rates' denominator |
 
 One residual case is decided in the operator's favour: a trip that is
 neither clearly completed nor clearly vanished (including any trip last
@@ -99,6 +100,38 @@ it.** The amendment was safe to adopt only after burn-in established the
 two facts it depends on — `vehicle_ts` present on effectively 100% of
 positions, and never once later than our fetch time.
 
+### Spec amendment G3 (2026-07-22): feed-health exclusion
+
+On 2026-07-21 the NTA VehiclePositions stream partially collapsed for ~40
+minutes: two operators' position reporting fell ~80% *simultaneously* while
+a third barely moved and our own tracker was healthy throughout. Every bus
+caught in it looked, trip by trip, exactly like a vehicle vanishing
+mid-route — hundreds of false accusations in the one class that ranks
+routes, invisible to the EXCLUDED gate because that gate watches *our*
+uptime, not the feed's.
+
+G3 generalizes EXCLUDED's founding logic one level up. For each graded
+operator and each 10-minute bucket the classifier computes the **reporting
+fraction** — scheduled trips active in the bucket that produced at least
+one position ping, over scheduled trips active. The denominator comes from
+the operator's own timetable, so quiet Saturdays are compared with
+Saturday's schedule, not a weekday's. When the fraction collapses below 0.5
+for at least two consecutive buckets, with at least 30 trips active and the
+tracker itself watching (our own downtime can never be blamed on the feed),
+trips overlapping the interval that would classify VANISHED or UNTRACKED
+become **EXCLUDED_FEED** instead. COMPLETED and CANCELLED are never touched
+— the shield removes accusations, never adds credit. The constants are
+methodology, not tuning: changing any of them is a public commit
+(`classify/feedhealth.py`).
+
+Named honestly: a genuine mass failure that also silenced position
+reporting is indistinguishable from a feed outage by this signal; when we
+cannot tell, we refuse to accuse, and the shielded count is published.
+2026-07-21 itself is **withdrawn entirely** rather than reclassified — its
+verdicts predate the rule, and a caveat under a ranking table protects
+nobody. Withdrawn days are listed with reasons in `data/manifest.json` and
+on the about-data page, and never count toward the 14-day baseline.
+
 ## The tracker grades itself
 
 EXCLUDED exists because a gap in *our* polling looks identical, from the
@@ -108,7 +141,7 @@ below 90% is pulled out of the operator's stats entirely and counted
 instead as tracker downtime, in public, on the same site as the bus data.
 The scoreboard ships alongside a 30-day tracker-uptime strip, gated by
 `run_checks.py`. Today that gate validates the outcome vocabulary (every
-outcome is one of the five valid classes) and the internal consistency of
+outcome is one of the six valid classes) and the internal consistency of
 the rollup code path itself — that its own aggregate class counts reconcile
 with the trip-level outcomes that produced them, and that neither published
 rate falls outside [0, 1]. That is a correctness check on the aggregation
@@ -137,7 +170,7 @@ plus real GTFS-Realtime protobufs built in-process.
 
 ## Status
 
-**Core pipeline: complete and tested.** The timetable engine, five-class
+**Core pipeline: complete and tested.** The timetable engine, six-class
 classifier, route/day and route/hour aggregates, offline-testable poller,
 and publish gate are all implemented and covered by the test suite (47
 tests, no network, runs in CI on every push once the repo is published).

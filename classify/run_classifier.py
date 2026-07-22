@@ -14,6 +14,7 @@ import datetime as dt
 import sqlite3
 from zoneinfo import ZoneInfo
 
+from classify.feedhealth import compute_shields, route_agency_map
 from classify.outcomes import classify_day
 from classify.store import init_store
 from ghostbus_config import get_db, read_agency_names, read_match_radius_m
@@ -27,9 +28,15 @@ def run_for_dates(db: sqlite3.Connection, dates: list[dt.date],
                   now_utc: dt.datetime, radius_m: float = 250.0) -> dict[str, dict[str, int]]:
     """Classify each service date's scheduled trips; return per-date outcome counts."""
     summary: dict[str, dict[str, int]] = {}
+    agency_of_route = route_agency_map(db)
     for service_date in dates:
         trips = scheduled_trips(db, service_date, agency_names=agency_names)
-        outcomes = classify_day(db, trips, now_utc, radius_m)
+        # Amendment G3: detect feed degradation for this date's trips and
+        # shield the accusatory classes. An empty map (pre-timetable DB)
+        # means no shields, which is exactly pre-G3 behaviour.
+        shields = compute_shields(db, trips, agency_of_route)
+        outcomes = classify_day(db, trips, now_utc, radius_m,
+                                shields=shields, agency_of_route=agency_of_route)
         counts: dict[str, int] = {}
         for outcome in outcomes.values():
             counts[outcome] = counts.get(outcome, 0) + 1

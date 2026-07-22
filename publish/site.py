@@ -22,7 +22,8 @@ from string import Template
 from aggregate.rates import rate_with_interval
 from publish.slugs import slug_map
 
-COUNT_FIELDS = ("scheduled", "excluded", "cancelled", "completed", "vanished", "untracked")
+COUNT_FIELDS = ("scheduled", "excluded", "excluded_feed", "cancelled",
+                "completed", "vanished", "untracked")
 RATE_FIELDS = (
     "vanished_rate", "vanished_lo", "vanished_hi",
     "untracked_rate", "untracked_lo", "untracked_hi",
@@ -234,7 +235,9 @@ def aggregate_window(rows: list[dict], window: int = WINDOW_DAYS) -> list[dict]:
 
     out = []
     for entry in by_route.values():
-        trials = entry["scheduled"] - entry["excluded"]
+        # Judged trips: scheduled minus our downtime (excluded) minus feed
+        # degradation (excluded_feed, amendment G3) - matching aggregate/rollup.py.
+        trials = entry["scheduled"] - entry["excluded"] - entry["excluded_feed"]
         entry["trials"] = trials
         entry["vanished_interval"] = rate_with_interval(entry["vanished"], trials)
         entry["untracked_interval"] = rate_with_interval(entry["untracked"], trials)
@@ -314,7 +317,8 @@ def _route_cell(entry: dict, slugs: dict[str, str], root: str = "") -> str:
 
 
 def _trips_cell(entry: dict) -> str:
-    title = f"{entry['scheduled']} scheduled, {entry['excluded']} excluded"
+    title = (f"{entry['scheduled']} scheduled, {entry['excluded']} excluded "
+             f"(tracker down), {entry['excluded_feed']} excluded (feed degraded)")
     return f'<td class="num" title="{esc(title)}">{esc(entry["trials"])}</td>'
 
 
@@ -491,8 +495,9 @@ def _daily_table(entry: dict, daily_rows: list[dict]) -> str:
                 f'<td colspan="5">{esc(gap_text)}</td></tr>'
             )
         else:
-            trials = row["scheduled"] - row["excluded"]
-            title = f"{row['scheduled']} scheduled, {row['excluded']} excluded"
+            trials = row["scheduled"] - row["excluded"] - row["excluded_feed"]
+            title = (f"{row['scheduled']} scheduled, {row['excluded']} excluded "
+                     f"(tracker down), {row['excluded_feed']} excluded (feed degraded)")
             parts.append(
                 "<tr>"
                 f"<td>{esc(iso)}</td>"
@@ -564,6 +569,7 @@ def render_route(site_dir, manifest: dict, entry: dict, daily_rows: list[dict],
         trials=esc(entry["trials"]),
         scheduled=esc(entry["scheduled"]),
         excluded=esc(entry["excluded"]),
+        excluded_feed=esc(entry["excluded_feed"]),
         cancelled=esc(entry["cancelled"]),
         completed=esc(entry["completed"]),
         vanished_count=esc(entry["vanished"]),
@@ -633,6 +639,20 @@ def render_about_data(site_dir, manifest: dict, data_dir) -> str:
         if not agencies
         else ", ".join(esc(name) for name in agencies)
     )
+    # Amendment G3: days we refused to publish, each with its reason. "None"
+    # when empty - an absent section would read as "nothing was ever
+    # withdrawn AND we would not tell you if it were". Reasons are our own
+    # prose but escaped anyway, same rule as every other render site.
+    withdrawn = manifest.get("withdrawn_days") or []
+    withdrawn_html = (
+        "None"
+        if not withdrawn
+        else "".join(
+            f"<li><strong>{esc(w.get('service_date', ''))}</strong> — "
+            f"{esc(w.get('reason', ''))}</li>" for w in withdrawn)
+    )
+    if withdrawn:
+        withdrawn_html = f"<ul>{withdrawn_html}</ul>"
 
     def shown(value) -> str:
         # `or EM_DASH`, not a .get default: the manifest publishes JSON nulls
@@ -653,6 +673,7 @@ def render_about_data(site_dir, manifest: dict, data_dir) -> str:
         trips_classified=esc(counts.get("trips_classified", 0)),
         unnamed_routes=unnamed_html,
         agencies=agencies_html,
+        withdrawn_days=withdrawn_html,
         csv_links=_csv_links(data_dir),
     )
     return render_page(

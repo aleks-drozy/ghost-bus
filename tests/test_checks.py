@@ -21,6 +21,17 @@ GOOD = [("a", "2026-03-23", "R1", "2026-03-23T07:00:00+00:00", "COMPLETED"),
         ("b", "2026-03-23", "R1", "2026-03-23T07:30:00+00:00", "UNTRACKED")]
 
 
+def test_conservation_and_vocabulary_accept_excluded_feed():
+    # Amendment G3: EXCLUDED_FEED is a valid outcome and conservation sums
+    # six classes. A five-class sum would report a real G3 database as
+    # violating conservation and block every publish.
+    db = make_db(GOOD + [("c", "2026-03-23", "R1",
+                          "2026-03-23T08:00:00+00:00", "EXCLUDED_FEED")])
+    assert check_outcomes_valid(db)["passed"]
+    assert check_conservation(db)["passed"]
+    assert check_rates_bounded(db)["passed"]
+
+
 def test_all_checks_pass_on_good_db():
     db = make_db(GOOD)
     assert check_conservation(db)["passed"]

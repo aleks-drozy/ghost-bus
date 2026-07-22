@@ -2,6 +2,7 @@ import pytest
 
 from tests.site_fixtures import daily_row
 
+from aggregate.rates import rate_with_interval
 from publish.site import (MIN_TRIPS, WINDOW_DAYS, aggregate_window, leaderboard,
                           window_dates)
 
@@ -46,6 +47,18 @@ def test_trials_is_scheduled_minus_excluded():
     rows = spread("R1", days(1), scheduled=40, excluded=10, vanished=3)
     entry = aggregate_window(rows)[0]
     assert entry["trials"] == 30
+
+
+def test_trials_excludes_feed_degraded_trips():
+    # Amendment G3: EXCLUDED_FEED leaves the judged denominator exactly like
+    # EXCLUDED - a route must not be ranked (or gated) on trips the feed
+    # blinded us to.
+    rows = spread("R1", days(1), scheduled=40, excluded=5, excluded_feed=3,
+                  vanished=2)
+    entry = aggregate_window(rows)[0]
+    assert entry["trials"] == 32
+    assert entry["excluded_feed"] == 3
+    assert entry["vanished_interval"] == rate_with_interval(2, 32)
 
 
 def test_route_with_29_judged_trips_is_unranked_and_30_is_ranked():

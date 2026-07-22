@@ -12,7 +12,8 @@ from pathlib import Path
 
 DAILY_COLUMNS = [
     "service_date", "route_id", "route_short_name", "route_long_name", "agency_name",
-    "scheduled", "excluded", "cancelled", "completed", "vanished", "untracked",
+    "scheduled", "excluded", "excluded_feed", "cancelled", "completed",
+    "vanished", "untracked",
     "vanished_rate", "vanished_lo", "vanished_hi",
     "untracked_rate", "untracked_lo", "untracked_hi",
 ]
@@ -26,6 +27,7 @@ DEFAULT_MANIFEST = {
     "coverage": {"first_day": "2026-06-01", "last_day": "2026-06-28", "complete_days": 28},
     "scoreboard_ready": True,
     "baseline_required_days": 14,
+    "withdrawn_days": [],
     "gate": {"conservation": True, "rates_bounded": True, "outcomes_valid": True},
     "agencies": ["Dublin Bus", "Go-Ahead Ireland"],
     "counts": {"observations": 128400, "snapshots": 40320, "trips_classified": 9111},
@@ -42,7 +44,8 @@ def daily_row(service_date, route_id, **kw):
     row = {c: "" for c in DAILY_COLUMNS}
     row["service_date"] = service_date
     row["route_id"] = route_id
-    for c in ("scheduled", "excluded", "cancelled", "completed", "vanished", "untracked"):
+    for c in ("scheduled", "excluded", "excluded_feed", "cancelled", "completed",
+              "vanished", "untracked"):
         row[c] = 0
     row.update(kw)
     return row

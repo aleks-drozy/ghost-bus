@@ -17,6 +17,9 @@ REQUIRED_METHODOLOGY_CLAIMS = [
     "amendment G2",
     "own report time",
     "no threshold",
+    "amendment G3",
+    "feed itself",
+    "withdrawn",
     "Wilson",
     "lower bound",
     "overlap",
@@ -125,6 +128,35 @@ def test_about_data_escapes_a_hostile_unnamed_route_id(tmp_path):
     html = render_about_data(SITE_DIR, manifest, data)
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;&quot;" in html
+
+
+def test_about_data_lists_withdrawn_days_with_reasons(tmp_path):
+    data = write_dataset(tmp_path / "data")
+    manifest = dict(DEFAULT_MANIFEST)
+    manifest["withdrawn_days"] = [
+        {"service_date": "2026-07-21", "reason": "feed outage test reason"}]
+    html = render_about_data(SITE_DIR, manifest, data)
+    assert "Withdrawn days" in html
+    assert "2026-07-21" in html
+    assert "feed outage test reason" in html
+
+
+def test_about_data_escapes_a_hostile_withdrawal_reason(tmp_path):
+    data = write_dataset(tmp_path / "data")
+    manifest = dict(DEFAULT_MANIFEST)
+    manifest["withdrawn_days"] = [
+        {"service_date": "2026-07-21", "reason": '<script>alert(1)</script>"'}]
+    html = render_about_data(SITE_DIR, manifest, data)
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;&quot;" in html
+
+
+def test_about_data_no_withdrawn_days_section_stays_quiet(tmp_path):
+    # No withdrawals -> say "None": an absent section would read as "nothing
+    # was ever withdrawn AND we would not tell you if it were".
+    data = write_dataset(tmp_path / "data")
+    html = render_about_data(SITE_DIR, DEFAULT_MANIFEST, data)
+    assert "Withdrawn days" in html
 
 
 def test_about_data_says_none_when_no_unnamed_routes(tmp_path):

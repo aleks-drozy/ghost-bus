@@ -31,11 +31,27 @@ BASELINE_REQUIRED_DAYS = 14
 LOCAL_TZ = "Europe/Dublin"
 UTC = dt.timezone.utc
 
+# Complete service days we refuse to publish, with the public reason.
+# Deliberately a code constant, not configuration: withdrawing (or
+# reinstating) a day changes what the public record claims, so it must be a
+# commit, in the open, like a spec amendment. Withdrawn days publish no
+# daily CSV, count for nothing (including the 14-day baseline), and are
+# listed with their reason in the manifest and on the about-data page.
+# Uptime is exempt: our own uptime is a fact about us, not an accusation.
+WITHDRAWN_DAYS: dict[str, str] = {
+    "2026-07-21": (
+        "NTA VehiclePositions feed partially collapsed ~19:20-20:00 UTC "
+        "(Dublin Bus and Bus Eireann reporting fell ~80% simultaneously while "
+        "the tracker itself was healthy), mass-producing VANISHED verdicts "
+        "that are feed artifacts, not operator behaviour. Withdrawn rather "
+        "than caveated - see the methodology page, amendment G3."),
+}
+
 UPTIME_COLUMNS = ("service_date", "expected_minutes", "ok_minutes", "uptime_fraction")
 
 DAILY_COLUMNS = ("service_date", "route_id", "route_short_name", "route_long_name",
-                 "agency_name", "scheduled", "excluded", "cancelled", "completed",
-                 "vanished", "untracked",
+                 "agency_name", "scheduled", "excluded", "excluded_feed",
+                 "cancelled", "completed", "vanished", "untracked",
                  "vanished_rate", "vanished_lo", "vanished_hi",
                  "untracked_rate", "untracked_lo", "untracked_hi")
 
@@ -177,10 +193,14 @@ def unnamed_routes(db: sqlite3.Connection, names: dict) -> list[str]:
 
 def complete_service_days(db: sqlite3.Connection, today: dt.date) -> list[str]:
     """Spec D7: only service days strictly before today (Europe/Dublin). A
-    partial day understates trip counts and distorts every rate built on it."""
+    partial day understates trip counts and distorts every rate built on it.
+    Withdrawn days (module constant above) are removed here, at the single
+    source every publish decision reads, so they publish nothing and count
+    for nothing downstream."""
     return [d for (d,) in db.execute(
         "SELECT DISTINCT service_date FROM trip_outcomes "
-        "WHERE service_date < ? ORDER BY service_date", (today.isoformat(),))]
+        "WHERE service_date < ? ORDER BY service_date", (today.isoformat(),))
+        if d not in WITHDRAWN_DAYS]
 
 
 def _daily_row(r: dict, names: dict) -> dict:
@@ -193,6 +213,7 @@ def _daily_row(r: dict, names: dict) -> dict:
         "agency_name": agency,
         "scheduled": r["scheduled"],
         "excluded": r["excluded"],
+        "excluded_feed": r["excluded_feed"],
         "cancelled": r["cancelled"],
         "completed": r["completed"],
         "vanished": r["vanished"],
@@ -355,6 +376,11 @@ def build_manifest(db: sqlite3.Connection, days: list[str], gate: dict,
                      "complete_days": len(days)},
         "scoreboard_ready": len(days) >= BASELINE_REQUIRED_DAYS,
         "baseline_required_days": BASELINE_REQUIRED_DAYS,
+        # Days we refuse to publish, each with its public reason (see
+        # WITHDRAWN_DAYS above). Sorted for byte-stable output.
+        "withdrawn_days": [
+            {"service_date": day, "reason": reason}
+            for day, reason in sorted(WITHDRAWN_DAYS.items())],
         "gate": {"conservation": gate["conservation"],
                  "rates_bounded": gate["rates_bounded"],
                  "outcomes_valid": gate["outcomes_valid"]},

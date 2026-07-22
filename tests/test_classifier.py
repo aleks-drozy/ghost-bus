@@ -264,6 +264,90 @@ def test_geo_evidence_cannot_lower_feed_progress(db):
     assert classify_trip(db, trip) == "COMPLETED"
 
 
+# --- Amendment G3: feed-health shield (EXCLUDED_FEED) ----------------------
+# When the feed itself was degraded for a trip's operator (see
+# classify/feedhealth.py), the accusatory classes convert to EXCLUDED_FEED.
+# The shield can only remove accusations - it never credits, never touches
+# COMPLETED/CANCELLED/EXCLUDED, and absent shields the classifier is
+# byte-identical to pre-G3.
+
+AGENCY_R1 = {"R1": "OpA"}
+
+
+def _shield_whole_window(trip):
+    return {"OpA": [(trip.window_start_utc, trip.window_end_utc)]}
+
+
+def test_g3_vanished_during_feed_degradation_is_excluded_feed(db):
+    trip = make_trip(n_stops=5, dur_min=60)
+    beat_window(db, trip)
+    obs(db, trip, 5, 1); obs(db, trip, 15, 2)  # would be VANISHED
+    assert classify_trip(db, trip, shields=_shield_whole_window(trip),
+                         agency_of_route=AGENCY_R1) == "EXCLUDED_FEED"
+
+
+def test_g3_untracked_during_feed_degradation_is_excluded_feed(db):
+    trip = make_trip()
+    beat_window(db, trip)  # no observations at all -> would be UNTRACKED
+    assert classify_trip(db, trip, shields=_shield_whole_window(trip),
+                         agency_of_route=AGENCY_R1) == "EXCLUDED_FEED"
+
+
+def test_g3_shield_never_touches_completed_or_cancelled(db):
+    trip = make_trip(n_stops=5)
+    beat_window(db, trip)
+    obs(db, trip, 55, 5)  # COMPLETED - evidence that exists still counts
+    assert classify_trip(db, trip, shields=_shield_whole_window(trip),
+                         agency_of_route=AGENCY_R1) == "COMPLETED"
+    trip2 = make_trip("T2")
+    beat_window(db, trip2)
+    record_observation(db, trip2.trip_id, str(DAY), trip2.start_utc.isoformat(), "cancel")
+    assert classify_trip(db, trip2, shields=_shield_whole_window(trip2),
+                         agency_of_route=AGENCY_R1) == "CANCELLED"
+
+
+def test_g3_our_downtime_stays_excluded_not_excluded_feed(db):
+    # EXCLUDED precedence: tracker downtime is OURS and is reported as ours,
+    # even if a feed shield covers the same window.
+    trip = make_trip()  # no heartbeats -> uptime 0
+    assert classify_trip(db, trip, shields=_shield_whole_window(trip),
+                         agency_of_route=AGENCY_R1) == "EXCLUDED"
+
+
+def test_g3_shield_for_another_agency_or_time_does_not_apply(db):
+    trip = make_trip(n_stops=5, dur_min=60)
+    beat_window(db, trip)
+    obs(db, trip, 5, 1); obs(db, trip, 15, 2)  # VANISHED on the merits
+    other_agency = {"OpB": [(trip.window_start_utc, trip.window_end_utc)]}
+    assert classify_trip(db, trip, shields=other_agency,
+                         agency_of_route=AGENCY_R1) == "VANISHED"
+    disjoint = {"OpA": [(trip.window_end_utc + dt.timedelta(minutes=1),
+                         trip.window_end_utc + dt.timedelta(minutes=30))]}
+    assert classify_trip(db, trip, shields=disjoint,
+                         agency_of_route=AGENCY_R1) == "VANISHED"
+
+
+def test_g3_no_shields_is_pre_g3_behaviour(db):
+    trip = make_trip(n_stops=5, dur_min=60)
+    beat_window(db, trip)
+    obs(db, trip, 5, 1); obs(db, trip, 15, 2)
+    assert classify_trip(db, trip) == "VANISHED"
+    assert classify_trip(db, trip, shields={}, agency_of_route={}) == "VANISHED"
+
+
+def test_g3_classify_day_threads_shields(db):
+    trip = make_trip(n_stops=5, dur_min=60)
+    beat_window(db, trip)
+    obs(db, trip, 5, 1); obs(db, trip, 15, 2)
+    result = classify_day(db, [trip], trip.window_end_utc + dt.timedelta(minutes=1),
+                          shields=_shield_whole_window(trip),
+                          agency_of_route=AGENCY_R1)
+    assert result == {trip.trip_id: "EXCLUDED_FEED"}
+    (stored,) = db.execute(
+        "SELECT outcome FROM trip_outcomes WHERE trip_id=?", (trip.trip_id,)).fetchone()
+    assert stored == "EXCLUDED_FEED"
+
+
 # --- Amendment G2: vehicle_ts is the evidence clock ------------------------
 # A position ping is evidence of where the bus was when the VEHICLE reported
 # (vehicle_ts), not when we happened to fetch it (ts_utc). Evidence time =

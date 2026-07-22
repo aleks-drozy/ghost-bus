@@ -1,7 +1,11 @@
 # Feed-Health Exclusion — Amendment Design (proposed G3)
 
 **Date:** 2026-07-22
-**Status:** Draft for review — NO implementation, NO classifier change yet
+**Status:** ACCEPTED — per-operator gate (Option B) + drop 2026-07-21, both
+chosen by Alex 2026-07-22. Implemented same day in the **schedule-relative
+form** (see "Fitting Option B", appended below): the trailing-days baseline
+this doc originally sketched was falsified by measurement before a line of
+it was built. Plan: `docs/superpowers/plans/2026-07-22-feed-health-g3.md`.
 **Depends on:** Phase 1 core spec, G1; companion to
 `2026-07-22-staleness-design.md` (same decide-before-publication deadline)
 **Spec amendment:** proposed **G3** (methodology change — dated, public)
@@ -135,3 +139,72 @@ any amendment decision.
 - README "The tracker grades itself" (EXCLUDED's founding logic — the
   principle this generalizes)
 - Vault `19-ghost-bus/KNOWN_ISSUES.md` (2026-07-21 feed-degradation entry)
+
+---
+
+## Fitting Option B (2026-07-22, before implementation)
+
+Option B as sketched above — per-operator position volume vs a trailing
+same-bucket baseline — was tested against the live data before being built,
+and **failed**: with the Sun+Mon median as baseline, Saturday 05:00–07:00
+runs at 0.13–0.18 of "normal" for Dublin Bus (and literally 0.0 for
+Go-Ahead at dawn) purely because Saturday service starts later. Those false
+ratios overlap the real incident's 0.27 trough, so no threshold separates
+them; a day-class-aware trailing baseline would fix that but cannot be
+fitted from 3 full days (one Saturday, one Sunday, one weekday — zero
+same-class pairs).
+
+**The fitted form is schedule-relative:** for each graded operator and each
+10-minute bucket,
+
+    reporting_fraction = scheduled trips active in the bucket with >=1
+                         position ping in it  /  scheduled trips active
+
+The denominator comes from the operator's own timetable, so the baseline is
+day-class aware by construction (the GTFS calendar already knows Saturdays
+and bank holidays), needs zero warm-up days, and cannot be contaminated by
+a multi-day outage the way a trailing window can. It has a physical anchor:
+the poller samples VehiclePositions every 120 s, and measurement confirms a
+reporting vehicle yields ~4.5 pings per 10-minute bucket regardless of feed
+health — the 2026-07-21 outage removed *whole vehicles* (589 → 157
+reporting trips at the trough), not pings per vehicle. Reporting fraction
+is therefore the direct signal.
+
+Measured margins (2026-07-21 incident vs healthy buckets): healthy daytime
+reporting fractions sit around 0.85–1.0; the incident trough was ~0.25.
+
+**Parameters (constants in code, not env — changing them is a methodology
+change and must be a commit):**
+
+| parameter | value | why |
+|---|---|---|
+| bucket | 600 s | matches §6.3 diagnostics; ~5 poll cycles |
+| threshold | 0.5 | wide margin from both sides: healthy ≥ ~0.85, incident ~0.25 |
+| min active trips | 30 | below this a bucket's fraction is noise (overnight); no gate |
+| min consecutive buckets | 2 | one noisy bucket must not blank an interval |
+| tracker-uptime guard | 0.9 | buckets where OUR uptime < 90% are not evaluated — our downtime must not read as feed degradation (EXCLUDED already owns those trips) |
+
+**Effect (the taxonomy decision):** trips whose window overlaps a degraded
+interval for their operator and whose outcome would be VANISHED or
+UNTRACKED classify as a sixth class, **EXCLUDED_FEED** — excluded because
+the *feed* was degraded: not operator blame, not tracker downtime.
+COMPLETED and CANCELLED are never touched (evidence that exists still
+counts; the shield can only remove accusations, never credit). Reusing
+EXCLUDED was rejected for the same reason Option C was: EXCLUDED's
+published meaning is "our downtime, counted against us", and bending it to
+absorb NTA's failures is how taxonomies rot. Both published rates'
+denominator becomes scheduled − EXCLUDED − EXCLUDED_FEED (trips we could
+judge), and conservation sums six classes.
+
+**Accepted limitation, named:** a genuine mass no-show event with working
+telematics that somehow also suppresses position reporting is
+indistinguishable from a feed outage by this signal; when we cannot tell,
+the asymmetry principle decides — refuse to accuse, publish the shielded
+count, and let cancellations and the surrounding intervals carry what
+really happened.
+
+**2026-07-21 itself:** dropped from publication entirely (decision 2,
+option 1) via an explicit withdrawn-days mechanism in the publisher —
+listed in the manifest with its reason, rendered on the about-data page,
+never in daily CSVs, never counted toward the 14-day baseline. The drop is
+parameter-free and stands even if G3's constants are re-fitted later.

@@ -11,25 +11,43 @@ from tests.dataset_fixture import SERVICE_DATE, build_db, consecutive_dates
 #   0/2 -> 0.000000 [0.000000, 0.657628]
 GOLDEN_DAILY = (
     "service_date,route_id,route_short_name,route_long_name,agency_name,"
-    "scheduled,excluded,cancelled,completed,vanished,untracked,"
+    "scheduled,excluded,excluded_feed,cancelled,completed,vanished,untracked,"
     "vanished_rate,vanished_lo,vanished_hi,"
     "untracked_rate,untracked_lo,untracked_hi\n"
-    "2026-03-23,03C 120 e a,,,,2,0,0,1,1,0,"
+    "2026-03-23,03C 120 e a,,,,2,0,0,0,1,1,0,"
     "0.500000,0.094529,0.905471,0.000000,0.000000,0.657628\n"
-    "2026-03-23,R1,1,Fixtureville Main,Fixtureville Bus,10,2,1,5,1,1,"
+    "2026-03-23,R1,1,Fixtureville Main,Fixtureville Bus,10,2,0,1,5,1,1,"
     "0.125000,0.022417,0.470895,0.125000,0.022417,0.470895\n"
-    "2026-03-23,R2,2,Fixtureville Orbital,Fixtureville Bus,1,1,0,0,0,0,"
+    "2026-03-23,R2,2,Fixtureville Orbital,Fixtureville Bus,1,1,0,0,0,0,0,"
     ",,,,,\n"
 )
 
 
 def test_daily_columns_match_the_spec_verbatim():
+    # excluded_feed: amendment G3 (feed degraded - NTA's failure, neither
+    # tracker downtime nor operator blame; out of both rates' denominator).
     assert DAILY_COLUMNS == (
         "service_date", "route_id", "route_short_name", "route_long_name",
-        "agency_name", "scheduled", "excluded", "cancelled", "completed",
-        "vanished", "untracked",
+        "agency_name", "scheduled", "excluded", "excluded_feed", "cancelled",
+        "completed", "vanished", "untracked",
         "vanished_rate", "vanished_lo", "vanished_hi",
         "untracked_rate", "untracked_lo", "untracked_hi")
+
+
+def test_excluded_feed_count_is_published_and_out_of_the_denominator():
+    db = build_db()
+    db.executemany("INSERT INTO trip_outcomes VALUES (?,?,?,?,?)", [
+        (f"R1_g3_{i}", SERVICE_DATE, "R1",
+         f"{SERVICE_DATE}T{14 + i:02d}:00:00+00:00", "EXCLUDED_FEED")
+        for i in range(2)])
+    db.commit()
+    r1 = next(r for r in daily_rows(db, SERVICE_DATE, route_names(db))
+              if r["route_id"] == "R1")
+    assert r1["scheduled"] == 12 and r1["excluded_feed"] == 2
+    # Denominator stays 12 - 2 excluded - 2 excluded_feed = 8: both rates
+    # unchanged by the shield.
+    assert r1["vanished_rate"] == "0.125000"
+    assert r1["untracked_rate"] == "0.125000"
 
 
 def test_no_column_sums_the_two_rates():

@@ -1,6 +1,8 @@
 import datetime as dt
 import json
 
+import publish.dataset as dataset
+
 from publish.dataset import (BASELINE_REQUIRED_DAYS, build_manifest,
                              published_slugs, route_names, write_dataset)
 from tests.dataset_fixture import (GTFS_HASH, GTFS_LOADED_AT, SERVICE_DATE,
@@ -20,8 +22,8 @@ def test_manifest_has_exactly_the_spec_keys(tmp_path):
     manifest = read_manifest(tmp_path)
     assert list(manifest) == ["schema_version", "generated_at", "timetable_hash",
                               "timetable_loaded_at", "coverage", "scoreboard_ready",
-                              "baseline_required_days", "gate", "agencies", "counts",
-                              "unnamed_routes", "route_slugs"]
+                              "baseline_required_days", "withdrawn_days", "gate",
+                              "agencies", "counts", "unnamed_routes", "route_slugs"]
     assert list(manifest["coverage"]) == ["first_day", "last_day", "complete_days"]
     assert list(manifest["gate"]) == ["conservation", "rates_bounded",
                                       "outcomes_valid"]
@@ -45,6 +47,8 @@ def test_manifest_values_for_a_single_complete_day(tmp_path, monkeypatch):
                      "complete_days": 1},
         "scoreboard_ready": False,
         "baseline_required_days": 14,
+        "withdrawn_days": [{"service_date": "2026-07-21",
+                            "reason": dataset.WITHDRAWN_DAYS["2026-07-21"]}],
         "gate": {"conservation": True, "rates_bounded": True,
                  "outcomes_valid": True},
         "agencies": ["Dublin Bus", "Go-Ahead Ireland"],

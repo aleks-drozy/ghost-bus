@@ -26,8 +26,8 @@ window = scheduled start − 5 min → scheduled end + 15 min.
 |---|---|
 | EXCLUDED | poller uptime < 90% of the trip window → excluded from operator stats, counted publicly as tracker downtime |
 | CANCELLED | feed marks the trip `CANCELED` at any point in the window |
-| COMPLETED | observed, and the highest stop-sequence progress reached across *all* reports (feed `stop_sequence` merged with our geographic match by taking the maximum, never the last report alone) is ≥ 90% of the trip, OR the last report we have is at or after 10 minutes before the scheduled end — one-sided, so any report after the scheduled end also satisfies this |
-| VANISHED | observed, then no signal for the rest of the window with progress < 75% and > 15 min left — tracked, then gone mid-route |
+| COMPLETED | observed, and the highest stop-sequence progress reached across *all* reports (feed `stop_sequence` merged with our geographic match by taking the maximum, never the last report alone) is ≥ 90% of the trip, OR the last *evidence* we have — timed by the vehicle's own report clock, not our fetch time (amendment G2) — is at or after 10 minutes before the scheduled end — one-sided, so any report after the scheduled end also satisfies this |
+| VANISHED | observed, then no evidence for the rest of the window (again on the vehicle's own clock, G2) with progress < 75% and > 15 min left — tracked, then gone mid-route |
 | UNTRACKED | zero vehicle *position* observations in the whole window (uptime ≥ 90%) — the classic ghost. A TripUpdate prediction alone is not proof a vehicle exists, so a trip with TripUpdate rows and no position ping is still untracked. Reported as *untracked*, not "did not run": a dead telematics unit looks identical to a bus that never left the depot, and we say so |
 
 One residual case is decided in the operator's favour: a trip that is
@@ -70,6 +70,34 @@ route whose outbound and return stops sit close together, a ping drifted
 toward the return stop can credit the higher sequence. We do not claim
 progress is never over-credited; we claim over-crediting can only mask a
 real ghost, never manufacture a fake one.
+
+### Spec amendment G2 (2026-07-22): the evidence clock
+
+The NTA feed republishes stale positions: on every full burn-in day,
+roughly one position ping in forty arrived carrying a vehicle timestamp
+already older than the 10-minute completion window it could have satisfied,
+concentrated late at night and unevenly split between operators. Until G2
+the classifier timed every report by our fetch time (`ts_utc`), so a
+republished position could keep a silent bus "alive" into the completion
+window — an operator-flattering error, quantified before it was fixed
+(design and full numbers: `docs/superpowers/specs/2026-07-22-staleness-design.md`).
+
+G2 sets **no staleness threshold** — the measured exposure declines
+smoothly under any candidate cutoff, with no knee, so every constant would
+be arbitrary. Instead a position ping is now evidence of the moment the
+*vehicle* reported (`vehicle_ts`), not the moment we fetched it: the
+evidence time of a ping is `min(vehicle_ts, ts_utc)`, falling back to
+`ts_utc` when `vehicle_ts` is absent. The COMPLETED time branch and the
+VANISHED cutoff read the last *evidence* time; the G1 pre-start rule gates
+progress on evidence time. Two things deliberately stay on fetch time:
+rows without `vehicle_ts` (which classify exactly as before), and the
+UNTRACKED existence test — so the reinterpretation can only remove wrongly
+earned credit, never manufacture the accusatory class. The `min()` clamp
+also means a vehicle clock running ahead of ours can never extend credit:
+**no trip can be COMPLETED under G2 that was not already COMPLETED before
+it.** The amendment was safe to adopt only after burn-in established the
+two facts it depends on — `vehicle_ts` present on effectively 100% of
+positions, and never once later than our fetch time.
 
 ## The tracker grades itself
 
@@ -129,19 +157,16 @@ starts seeing the live feed instead of fixtures.
 - **Advance cancellations that leave the feed before a trip's window opens
   would classify UNTRACKED**, not CANCELLED — feed retention behaviour
   around cancellations is to be verified in burn-in.
-- **Feed staleness is measured but not yet acted on.** Every VehiclePositions
-  ping now stores the vehicle's own report time (`observations.vehicle_ts`)
-  alongside our poll time (`ts_utc`), so a republished stale position is
-  finally distinguishable from a live one. **No classifier behaviour depends
-  on it yet** — this is deliberate: the 10-minute COMPLETED branch currently
-  treats a stale republished position as fresh evidence a bus was moving,
-  which is operator-flattering, but choosing a staleness threshold before
-  seeing the real lag distribution would just be guessing. Burn-in measures
-  the distribution (`ops/RUNBOOK.md` §6); a methodology amendment follows the
-  data, not the other way round. There is no amendment number for this: it is
-  a schema addition, and the methodology is unchanged since G1. Rows recorded
-  before the column existed have `vehicle_ts` NULL and are not evidence of
-  freshness either way.
+- **Feed staleness is now acted on (G2), with one residual risk in the
+  strict direction.** The evidence clock trusts `vehicle_ts` never to freeze:
+  a vehicle whose clock sticks while its GPS keeps updating would look
+  silent and could read as VANISHED. Burn-in found no negative skew and a
+  stable lag distribution, and RUNBOOK §6 watches for the frozen-clock
+  signature (lag growing linearly across a vehicle's consecutive pings); if
+  it ever appears at material rates the amendment gets revisited — in
+  public, like this one. Rows recorded before the `vehicle_ts` column
+  existed classify exactly as pre-G2, and are not evidence of freshness
+  either way.
 - **Hour-of-day statistics pool across dates** — the route/hour rollup does
   not distinguish, say, "Tuesdays at 5pm" from every day at 5pm ever
   observed.

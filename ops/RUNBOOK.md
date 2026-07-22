@@ -415,9 +415,13 @@ This sequence starts coordinate capture soonest:
 
 ## 6. Burn-in measurement: feed staleness (vehicle_ts vs ts_utc)
 
-> Schema addition only — **not** a spec amendment. The classification
-> methodology is unchanged since G1; this section adds a measurement whose
-> results may *later* justify an amendment.
+> **Update 2026-07-22: the amendment this section existed to justify now
+> exists — G2, the evidence clock** (design:
+> `docs/superpowers/specs/2026-07-22-staleness-design.md`; deploy: §9).
+> The classifier times position evidence by `min(vehicle_ts, ts_utc)`.
+> These queries stay: they are the ongoing monitoring that G2's two
+> preconditions (near-total `vehicle_ts` coverage, no negative skew) still
+> hold, and §6.4 watches the one residual risk G2 introduced.
 
 Every VehiclePositions ping stores two clocks: `ts_utc` (when *we* polled)
 and `vehicle_ts` (when the *vehicle* says it reported). Their difference is
@@ -545,6 +549,40 @@ Any interval this section flags contaminates that day's VANISHED counts —
 record it in the vault's KNOWN_ISSUES and treat the day as unpublishable
 until the G3 decision exists. Use `-readonly` as written: these are
 analysis queries and must never hold a write lock on the live database.
+
+### 6.4 Frozen-clock watch (the residual risk G2 introduced)
+
+G2 trusts `vehicle_ts`. The failure mode that would hurt an operator: a
+vehicle whose **clock freezes while its GPS keeps updating** — its pings
+would look increasingly stale, the evidence clock would stop advancing, and
+a live bus could read as VANISHED. The signature is identical `vehicle_ts`
+across pings whose *positions differ* (identical position + identical
+vehicle_ts is ordinary republication, which G2 handles by design):
+
+```bash
+sqlite3 -readonly /opt/ghost-bus/state/ghostbus.db <<'SQL'
+SELECT substr(ts_utc,1,10) AS day,
+       COUNT(*) AS frozen_groups,
+       SUM(n_pings) AS pings_involved
+FROM (
+  SELECT ts_utc, COUNT(*) AS n_pings
+  FROM observations
+  WHERE kind='position' AND vehicle_ts IS NOT NULL
+        AND lat IS NOT NULL AND lon IS NOT NULL
+  GROUP BY trip_id, service_date, vehicle_ts
+  HAVING COUNT(DISTINCT lat || ',' || lon) > 1
+)
+GROUP BY day ORDER BY day;
+SQL
+```
+
+Caveats when reading it: two physically distinct vehicles reporting the
+same trip_id (the backfill's ambiguity case — it has happened in
+production) also produce differing positions under one timestamp, so treat
+single groups as noise and *trends* as signal. A material, persistent rate
+here reopens the G2 design (the hybrid floor discussed in its "residual
+risks" section) — in the spec and on the methodology page, not as a quiet
+code change.
 
 ---
 
@@ -1082,3 +1120,74 @@ Absent that, watch it from the output side instead:
   `healthchecks.io` account wired up for the poller (§3.3); a second, longer-
   period check that fetches the manifest and pings only when `generated_at`
   is fresh is the natural place to add this.
+
+---
+
+## 9. Upgrade to the evidence clock (G2, 2026-07-22)
+
+> Methodology amendment — after this deploy, COMPLETED's time branch and
+> VANISHED's cutoff read the vehicle's own report time
+> (`min(vehicle_ts, ts_utc)`), and the G1 pre-start progress gate does the
+> same. No schema change, no config change, no unit-file change: the deploy
+> is a code pull plus one deliberate reclassification pass.
+
+**Blocked until the P4 owner steps (§8.1) are done and main is pushed** —
+the VM pulls from the public repo.
+
+### 9.1 Deploy
+
+As `ubuntu` (every unit runs as `ubuntu` — §2.2 — and the checkout is
+`ubuntu`-owned; no `sudo` anywhere in this section):
+
+```bash
+cd /opt/ghost-bus && git pull
+# classifier picks the new code up on its next timer run; nothing to restart
+# (the poller does not classify, no schema changes, no unit-file changes).
+```
+
+### 9.2 Reclassify the whole baseline under one methodology
+
+`classify_day` upserts by `(trip_id, service_date)` and observations are
+never deleted, so reclassification is just re-running the classifier over
+every burn-in date. Run it once, immediately after the deploy, so the
+published series never mixes pre- and post-G2 verdicts:
+
+```bash
+cd /opt/ghost-bus && .venv/bin/python - <<PY
+import datetime as dt
+from classify.run_classifier import run_for_dates
+from classify.store import init_store
+from ghostbus_config import get_db, read_agency_names, read_match_radius_m
+
+db = get_db(); init_store(db)
+start = dt.date(2026, 7, 18)          # first burn-in service date
+end = dt.date.today()
+dates = [start + dt.timedelta(days=i) for i in range((end - start).days + 1)]
+summary = run_for_dates(db, dates, read_agency_names(),
+                        dt.datetime.now(dt.timezone.utc), read_match_radius_m())
+for day, counts in summary.items():
+    print(day, counts)
+PY
+```
+
+The classifier writes here, so `-readonly` does not apply — but the same
+lock courtesy as the nightly timer does: `classify_day` computes read-only
+and batches its writes at the end, and its own write burst is the same size
+as any normal run.
+
+Expected direction of movement, from the design's measurement: a small
+number of COMPLETED trips (order tens per day, concentrated in late-evening
+hours) become VANISHED; **no trip can move toward COMPLETED** — G2 is
+monotonically stricter by construction. A movement wildly outside that
+envelope (hundreds per day, or any COMPLETED gain) means something is wrong:
+stop and compare against the pre-deploy `trip_outcomes` before publishing
+anything.
+
+### 9.3 Verify
+
+- Re-run a spot date's counts twice — identical output (idempotence).
+- §6.1 coverage columns still ~100% and `min_s` still non-negative (G2's
+  preconditions).
+- §6.4 frozen-clock watch shows no material trend.
+- The 2026-07-21 feed-degradation day (§6.3) remains contaminated
+  regardless of G2 — its handling is the G3 decision, not this one.

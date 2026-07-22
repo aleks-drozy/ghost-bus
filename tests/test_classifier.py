@@ -36,10 +36,14 @@ def beat_window(db, trip, skip_fraction=0.0):
         i += 1
 
 
-def obs(db, trip, minutes_after_start, seq):
+def obs(db, trip, minutes_after_start, seq, vts_minutes=None):
+    # vts_minutes: vehicle's own report time (G2 evidence clock), minutes
+    # after scheduled start; None stores NULL (pre-migration / feed omission).
+    vts = (None if vts_minutes is None else
+           (trip.start_utc + dt.timedelta(minutes=vts_minutes)).isoformat())
     record_observation(db, trip.trip_id, str(DAY),
                        (trip.start_utc + dt.timedelta(minutes=minutes_after_start)).isoformat(),
-                       "position", seq)
+                       "position", seq, vehicle_ts=vts)
 
 
 def test_excluded_when_tracker_down(db):
@@ -165,10 +169,12 @@ def geo_timetable(db, trip_id="T1", coords=GEO_COORDS):
         db.execute("INSERT OR REPLACE INTO gtfs_stops VALUES (?,?,?)", (sid, lat, lon))
 
 
-def geo_obs(db, trip, minutes_after_start, lat, lon):
+def geo_obs(db, trip, minutes_after_start, lat, lon, vts_minutes=None):
+    vts = (None if vts_minutes is None else
+           (trip.start_utc + dt.timedelta(minutes=vts_minutes)).isoformat())
     record_observation(db, trip.trip_id, str(DAY),
                        (trip.start_utc + dt.timedelta(minutes=minutes_after_start)).isoformat(),
-                       "position", None, lat, lon)
+                       "position", None, lat, lon, vehicle_ts=vts)
 
 
 def test_geo_completed_via_progress_branch(db):
@@ -255,4 +261,98 @@ def test_geo_evidence_cannot_lower_feed_progress(db):
     geo_timetable(db)
     obs(db, trip, 25, 5)
     geo_obs(db, trip, 26, *GEO_COORDS[0])
+    assert classify_trip(db, trip) == "COMPLETED"
+
+
+# --- Amendment G2: vehicle_ts is the evidence clock ------------------------
+# A position ping is evidence of where the bus was when the VEHICLE reported
+# (vehicle_ts), not when we happened to fetch it (ts_utc). Evidence time =
+# min(vehicle_ts, ts_utc), falling back to ts_utc when vehicle_ts is NULL.
+# Window membership and the UNTRACKED existence test stay on ts_utc.
+
+
+def test_g2_stale_republication_cannot_time_complete(db):
+    # Fresh pings until minute 15 (progress 2/5 = 0.4), then the feed keeps
+    # republishing that minute-15 position: fetch times run to the scheduled
+    # end but vehicle_ts is stuck at minute 15. Pre-G2 the last fetch time
+    # sat inside the 10-minute window -> COMPLETED. Under G2 the last
+    # EVIDENCE is minute 15 -> silence > 15 min with progress < 0.75 ->
+    # VANISHED.
+    trip = make_trip(n_stops=5, dur_min=60)
+    beat_window(db, trip)
+    obs(db, trip, 5, 1, vts_minutes=5)
+    obs(db, trip, 15, 2, vts_minutes=15)
+    obs(db, trip, 35, None, vts_minutes=15)
+    obs(db, trip, 55, None, vts_minutes=15)
+    assert classify_trip(db, trip) == "VANISHED"
+
+
+def test_g2_stale_prestart_ping_carries_no_progress(db):
+    # A layover vehicle near the LAST stop reported before the scheduled
+    # start; the feed republishes that position after the start. The fetch
+    # time is post-start but the EVIDENCE predates the trip: it must not
+    # complete a trip that never departed (the G1 pre-start rule, applied to
+    # the honest clock).
+    trip = make_trip(n_stops=5)
+    beat_window(db, trip)
+    geo_timetable(db)
+    geo_obs(db, trip, 2, *GEO_COORDS[4], vts_minutes=-3)
+    assert classify_trip(db, trip) == "VANISHED"
+
+
+def test_g2_all_stale_window_is_vanished_not_untracked(db):
+    # Every in-window ping is a republication whose vehicle_ts predates the
+    # window. Existence deliberately stays on ts_utc (a fetched ping still
+    # proves a vehicle exists -> never UNTRACKED, which would let our clock
+    # reinterpretation manufacture the accusatory class), but credit uses
+    # the evidence clock -> no time-branch COMPLETED either.
+    trip = make_trip(n_stops=5, dur_min=60)
+    beat_window(db, trip)
+    obs(db, trip, 10, None, vts_minutes=-20)
+    obs(db, trip, 55, None, vts_minutes=-20)
+    assert classify_trip(db, trip) == "VANISHED"
+
+
+def test_g2_null_vehicle_ts_preserves_behaviour(db):
+    # NULL vehicle_ts (pre-migration rows, feed omission) must reproduce
+    # pre-G2 classification exactly: last FETCH within 10 min of end ->
+    # COMPLETED.
+    trip = make_trip(n_stops=10)
+    beat_window(db, trip)
+    obs(db, trip, 55, 6)  # no vts -> NULL
+    assert classify_trip(db, trip) == "COMPLETED"
+
+
+def test_g2_fresh_vehicle_ts_time_branch_still_fires(db):
+    # A genuinely live bus (vehicle_ts == fetch time) near the end keeps its
+    # COMPLETED credit unchanged.
+    trip = make_trip(n_stops=10)
+    beat_window(db, trip)
+    obs(db, trip, 55, 6, vts_minutes=55)
+    assert classify_trip(db, trip) == "COMPLETED"
+
+
+def test_g2_future_vehicle_ts_never_extends_credit(db):
+    # A vehicle clock running AHEAD of ours claims minute 58 on a ping we
+    # fetched at minute 20. Evidence time clamps to fetch time: the trip
+    # stays VANISHED exactly as pre-G2. A naive vehicle_ts-wins
+    # implementation would reach COMPLETED via the time branch.
+    trip = make_trip(n_stops=5, dur_min=60)
+    beat_window(db, trip)
+    obs(db, trip, 5, 1, vts_minutes=5)
+    obs(db, trip, 20, 2, vts_minutes=58)
+    assert classify_trip(db, trip) == "VANISHED"
+
+
+def test_g2_residual_benefit_of_doubt_survives(db):
+    # Progress 4/5 = 0.8 sits in [0.75, 0.90): neither clearly completed nor
+    # clearly vanished. Even though the near-end pings are stale
+    # republications, the residual rule still decides for the operator ->
+    # COMPLETED. G2 removes stale credit; it must not remove the benefit of
+    # the doubt.
+    trip = make_trip(n_stops=5, dur_min=60)
+    beat_window(db, trip)
+    obs(db, trip, 5, 2, vts_minutes=5)
+    obs(db, trip, 25, 4, vts_minutes=25)
+    obs(db, trip, 55, None, vts_minutes=25)
     assert classify_trip(db, trip) == "COMPLETED"

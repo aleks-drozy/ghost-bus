@@ -2,13 +2,26 @@
 
 EXCLUDED   tracker uptime < 90% of the trip window (our fault, not the operator's)
 CANCELLED  feed marked the trip CANCELED during the window
-COMPLETED  progress >= 90% of stops OR last observation within 10 min of scheduled end
+COMPLETED  progress >= 90% of stops OR last evidence within 10 min of scheduled end
            (progress = feed stop_sequence UNION geographic nearest-stop matching, G1)
 VANISHED   observed, then silent with progress < 75% and > 15 min still to run
            (progress = feed stop_sequence UNION geographic nearest-stop matching, G1)
 UNTRACKED  no VEHICLE observation in the window (TripUpdate predictions alone do
            not prove a bus exists - predictions-without-a-vehicle is exactly the
            commuter's ghost)
+
+Amendment G2 (2026-07-22): a position ping is evidence of the moment the
+VEHICLE reported (vehicle_ts), not the moment we fetched it (ts_utc) - the
+NTA feed republishes stale positions (2.3-2.5% of pings arrive already older
+than the 10-minute credit window, measured over the burn-in baseline), and
+crediting fetch time let a bus that went silent stay "alive" on republished
+evidence. Evidence time = min(vehicle_ts, ts_utc): NULL vehicle_ts falls
+back to ts_utc (pre-migration rows reproduce pre-G2 behaviour exactly), and
+the min() means a vehicle clock running ahead of ours can never extend
+credit - G2 is monotonically stricter, so no trip can become COMPLETED
+under it that was not already. Window membership and the UNTRACKED
+existence test deliberately stay on ts_utc: reinterpreting clocks may only
+remove operator-flattering credit, never manufacture the accusatory class.
 """
 from __future__ import annotations
 
@@ -50,27 +63,39 @@ def classify_trip(db: sqlite3.Connection, trip: ScheduledTrip,
     if uptime(db, trip.window_start_utc, trip.window_end_utc) < 0.90:
         return "EXCLUDED"
     rows = db.execute(
-        "SELECT ts_utc, kind, stop_sequence, lat, lon FROM observations "
+        "SELECT ts_utc, kind, stop_sequence, lat, lon, vehicle_ts FROM observations "
         "WHERE trip_id=? AND service_date=? AND ts_utc>=? AND ts_utc<? ORDER BY ts_utc",
         (trip.trip_id, str(trip.service_date),
          trip.window_start_utc.isoformat(), trip.window_end_utc.isoformat())).fetchall()
-    if any(kind == "cancel" for _, kind, _, _, _ in rows):
+    if any(kind == "cancel" for _, kind, _, _, _, _ in rows):
         return "CANCELLED"
-    tracked = [(ts, seq, lat, lon) for ts, kind, seq, lat, lon in rows if kind == "position"]
+    tracked = [(ts, seq, lat, lon, vts)
+               for ts, kind, seq, lat, lon, vts in rows if kind == "position"]
     if not tracked:
         return "UNTRACKED"
-    # Parse before comparing - string order breaks if timestamp formats ever vary.
-    last_ts = max(dt.datetime.fromisoformat(ts) for ts, _, _, _ in tracked)
-    seqs = [seq for _, seq, _, _ in tracked if seq is not None]
+    # Evidence clock (amendment G2): min(vehicle_ts, ts_utc), ts_utc when
+    # vehicle_ts is NULL. Parse before comparing - string order breaks if
+    # timestamp formats ever vary. A malformed vehicle_ts raises: the poller
+    # pins ISO-or-NULL at ingest, so anything else is database corruption and
+    # must crash rather than silently reshape outcomes (same rule as the geo
+    # query below).
+    def evidence_ts(ts: str, vts: str | None) -> dt.datetime:
+        fetched = dt.datetime.fromisoformat(ts)
+        return fetched if vts is None else min(dt.datetime.fromisoformat(vts), fetched)
+
+    last_ts = max(evidence_ts(ts, vts) for ts, _, _, _, vts in tracked)
+    seqs = [seq for _, seq, _, _, _ in tracked if seq is not None]
     # Geographic evidence (amendment G1): GPS pings matched to the trip's own
     # scheduled stops. Merges with feed stop_sequence by max - it can only
     # RAISE progress, never lower it or affect any other class.
-    # Only pings at/after the scheduled start carry progress: a vehicle keyed
-    # to the trip during the 5-min pre-window (layover near a terminus) must
-    # not complete a trip that never departed. Existence still counts above.
-    pings = [(lat, lon) for ts, _, lat, lon in tracked
+    # Only pings whose EVIDENCE time (G2) is at/after the scheduled start
+    # carry progress: a vehicle keyed to the trip during the 5-min pre-window
+    # (layover near a terminus), or a post-start republication of such a
+    # pre-start position, must not complete a trip that never departed.
+    # Existence still counts above.
+    pings = [(lat, lon) for ts, _, lat, lon, vts in tracked
              if lat is not None and lon is not None
-             and dt.datetime.fromisoformat(ts) >= trip.start_utc]
+             and evidence_ts(ts, vts) >= trip.start_utc]
     if pings:
         geo_seq = matched_max_seq(_trip_stop_coords(db, trip.trip_id), pings, radius_m)
         if geo_seq is not None:

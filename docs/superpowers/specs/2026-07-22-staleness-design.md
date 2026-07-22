@@ -1,7 +1,10 @@
 # Feed Staleness — Amendment Design (proposed G2)
 
 **Date:** 2026-07-22
-**Status:** Draft for review — NO implementation, NO classifier change yet
+**Status:** ACCEPTED — Option D chosen by Alex 2026-07-22; implemented same
+day (TDD, `classify/outcomes.py` + 7 tests; plan:
+`docs/superpowers/plans/2026-07-22-staleness-g2.md`; deploy + baseline
+reclassification: RUNBOOK §9, blocked on the P4 owner steps)
 **Depends on:** G1 (`2026-07-19-geo-progress-design.md`), vehicle_ts capture
 (merged `1164011`), RUNBOOK §6 burn-in measurements
 **Spec amendment:** proposed **G2** (methodology change — dated, public).

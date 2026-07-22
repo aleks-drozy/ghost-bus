@@ -172,8 +172,9 @@ plus real GTFS-Realtime protobufs built in-process.
 
 **Core pipeline: complete and tested.** The timetable engine, six-class
 classifier, route/day and route/hour aggregates, offline-testable poller,
-and publish gate are all implemented and covered by the test suite (47
-tests, no network, runs in CI on every push once the repo is published).
+and publish gate are all implemented and covered by the test suite (no
+network, runs in CI on every push — the badge above is the live count;
+a number written here would only go stale).
 
 **Live deployment: pending two owner tasks** — an NTA developer API key
 (free, from `developer.nationaltransport.ie`) and an Oracle Cloud free-tier

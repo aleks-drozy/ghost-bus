@@ -151,17 +151,17 @@ def test_readme_gate_copy_counts_trips_judged(readme):
 
 
 def test_readme_taxonomy_states_the_max_over_all_reports_not_just_the_last(readme):
-    """I2: classify/outcomes.py:80 uses max(seqs) over every report in the
+    """I2: classify/outcomes.py:105 uses max(seqs) over every report in the
     window (feed stop_sequence merged with the geographic match), not the
-    last observation alone - and line 68 of this same file already says so
-    ('the two evidence sources merge by taking the maximum'). The taxonomy
+    last observation alone - and the geo-evidence comment in that same file
+    already says so ('Merges with feed stop_sequence by max'). The taxonomy
     table must not contradict its own file."""
     assert "last observation shows stop-sequence progress" not in readme
     assert "highest stop-sequence progress reached across" in readme
 
 
 def test_readme_taxonomy_states_the_completion_window_is_one_sided(readme):
-    """classify/outcomes.py:81 is `last_ts >= trip.end_utc - timedelta(minutes=10)`
+    """classify/outcomes.py:106 is `last_ts >= trip.end_utc - timedelta(minutes=10)`
     - one-sided, satisfied by anything from 10 minutes before the scheduled
     end onward, including after it. 'within 10 min of the scheduled
     final-stop time' reads as a two-sided window around that instant."""

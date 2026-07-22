@@ -491,6 +491,61 @@ Mean is deliberately the coarse first cut here — it is cheap and a jump in
 it is a reliable "go look at §6.1 for that day" trigger. Do not publish the
 mean itself: staleness is a tail phenomenon and the mean hides the tail.
 
+### 6.3 Feed-volume watch (VehiclePositions degradation)
+
+> Added 2026-07-22 after a real incident: on 2026-07-21 ~19:20–20:00 UTC the
+> VehiclePositions feed partially collapsed (Dublin Bus −79%, Bus Éireann
+> −80%, Go-Ahead −19% at the trough) while TripUpdates and our own heartbeats
+> ran normally. The classifier converted the gap into ~280 false VANISHED
+> verdicts. **The §3 health checks cannot see this** — they watch *our*
+> uptime, and we were up. This section is the detection query; whether the
+> classifier should act on feed degradation is a separate design decision
+> (`docs/superpowers/specs/2026-07-22-feed-health-design.md`, proposed G3).
+
+Position pings per 10-minute bucket for a suspect window, against the same
+buckets one day earlier — run when a day shows an unexplained VANISHED spike,
+or daily during burn-in:
+
+```bash
+sqlite3 -readonly /opt/ghost-bus/state/ghostbus.db <<'SQL'
+SELECT substr(ts_utc,1,15) || '0' AS bucket10,
+       SUM(kind='position') AS positions,
+       SUM(kind='update')   AS updates
+FROM observations
+WHERE ts_utc >= '2026-07-21T17:00' AND ts_utc < '2026-07-21T22:00'
+GROUP BY bucket10 ORDER BY bucket10;
+SQL
+```
+
+Reading it: positions decline smoothly through an evening (07-20 ran ~6.7k
+→ ~3.6k over 17:30–21:20 with no bucket below ~2.9k). A **V-shape** — a
+sharp dip with recovery — is a feed event, not service wind-down. `updates`
+holding steady while `positions` collapses is the confirming signature: the
+predictions pipeline is fine, the vehicle-telemetry pipeline is not.
+
+Attribute a dip to operators before drawing any conclusion — simultaneous
+collapse across operators means a shared upstream, not mass breakdowns:
+
+```bash
+sqlite3 -readonly /opt/ghost-bus/state/ghostbus.db <<'SQL'
+SELECT substr(o.ts_utc,1,15) || '0' AS bucket10,
+       COALESCE(a.agency_name,'(other)') AS agency,
+       COUNT(*) AS positions
+FROM observations o
+LEFT JOIN gtfs_trips t ON t.trip_id = o.trip_id
+LEFT JOIN gtfs_routes r ON r.route_id = t.route_id
+LEFT JOIN gtfs_agency a ON a.agency_id = r.agency_id
+WHERE o.kind='position' AND o.ts_utc >= '2026-07-21T18:50'
+                        AND o.ts_utc <  '2026-07-21T20:20'
+GROUP BY bucket10, agency ORDER BY bucket10, positions DESC;
+SQL
+```
+
+Any interval this section flags contaminates that day's VANISHED counts —
+record it in the vault's KNOWN_ISSUES and treat the day as unpublishable
+until the G3 decision exists. Use `-readonly` as written: these are
+analysis queries and must never hold a write lock on the live database.
+
 ---
 
 ## 7. Backfilling GPS coordinates from the archive (`ingest/backfill.py`)

@@ -363,6 +363,15 @@ class Sandbox:
         _git(self.repo_dir, "commit", "-q", "-m", "initial")
 
         _git(tmp_path, "init", "-q", str(self.data_repo))
+        # Identity for tests that commit in data-repo directly (the
+        # person-debugging / attacker scenarios). publish.sh's own commits
+        # carry their author via environment, so the real deploy never needs
+        # this - but a bare CI runner has no global identity, and without
+        # these lines those tests fail with exit 128 only in CI (they pass on
+        # any dev machine with a configured ~/.gitconfig, which is how it
+        # slipped through to the first CI run).
+        _git(self.data_repo, "config", "user.email", "debugger@example.invalid")
+        _git(self.data_repo, "config", "user.name", "debugger")
         _git(tmp_path, "init", "-q", "--bare", str(self.remote))
 
     def run(self, env_overrides=None) -> subprocess.CompletedProcess:

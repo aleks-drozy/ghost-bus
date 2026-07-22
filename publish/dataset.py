@@ -321,7 +321,15 @@ def timetable_loaded_at(db: sqlite3.Connection) -> str:
 
 
 def published_route_ids(db: sqlite3.Connection, days: list[str]) -> list[str]:
-    """Every route id appearing in the published service days."""
+    """Every route id appearing in the published service days.
+
+    The BETWEEN range can span a withdrawn middle day, so a route seen only
+    on a withdrawn day still enters route_slugs. Deliberate: slugs are URL
+    reservations carrying no outcome data, and reserving early keeps a
+    route's public URL stable for when it next appears on a published day.
+    Verdict data cannot leak this way - the withdrawn day has no daily CSV,
+    and every page is built from the CSVs alone.
+    """
     if not days:
         return []
     # A range, not an IN list: `days` grows by one per day forever and would

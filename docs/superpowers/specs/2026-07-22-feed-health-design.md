@@ -208,3 +208,12 @@ option 1) via an explicit withdrawn-days mechanism in the publisher —
 listed in the manifest with its reason, rendered on the about-data page,
 never in daily CSVs, never counted toward the 14-day baseline. The drop is
 parameter-free and stands even if G3's constants are re-fitted later.
+
+**Post-review note (M1, 2026-07-22):** the tracker-uptime guard is the one
+place the rule's two error directions are not symmetric. A brief dip in OUR
+coverage inside a real feed outage removes those buckets from evaluation,
+which can split a degraded run below MIN_RUN and leave a deserving trip
+VANISHED - the guard favours the accusation in exactly that borderline
+band. Accepted (letting unwatched buckets bridge runs would arm the gate
+across stretches nobody observed, a worse failure), and stated on the
+methodology page as the second of the rule's three named costs.

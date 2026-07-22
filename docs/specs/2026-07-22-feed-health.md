@@ -5,7 +5,7 @@
 chosen by Alex 2026-07-22. Implemented same day in the **schedule-relative
 form** (see "Fitting Option B", appended below): the trailing-days baseline
 this doc originally sketched was falsified by measurement before a line of
-it was built. Plan: `docs/superpowers/plans/2026-07-22-feed-health-g3.md`.
+it was built.
 **Depends on:** Phase 1 core spec, G1; companion to
 `2026-07-22-staleness-design.md` (same decide-before-publication deadline)
 **Spec amendment:** proposed **G3** (methodology change — dated, public)

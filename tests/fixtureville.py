@@ -1,4 +1,4 @@
-"""Synthetic GTFS network for tests: 2 routes, WK+SAT services, a past-midnight
+"""Synthetic GTFS network for tests: 3 routes, 19 trips, WK+SAT services, a past-midnight
 trip, valid across the 2026-03-29 DST change. Deterministic, built in-memory."""
 from __future__ import annotations
 

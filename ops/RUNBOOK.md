@@ -417,7 +417,7 @@ This sequence starts coordinate capture soonest:
 
 > **Update 2026-07-22: the amendment this section existed to justify now
 > exists — G2, the evidence clock** (design:
-> `docs/superpowers/specs/2026-07-22-staleness-design.md`; deploy: §9).
+> `docs/specs/2026-07-22-staleness.md`; deploy: §9).
 > The classifier times position evidence by `min(vehicle_ts, ts_utc)`.
 > These queries stay: they are the ongoing monitoring that G2's two
 > preconditions (near-total `vehicle_ts` coverage, no negative skew) still
@@ -504,7 +504,7 @@ mean itself: staleness is a tail phenomenon and the mean hides the tail.
 > verdicts. **The §3 health checks cannot see this** — they watch *our*
 > uptime, and we were up. This section is the detection query; whether the
 > classifier should act on feed degradation is a separate design decision
-> (`docs/superpowers/specs/2026-07-22-feed-health-design.md`, proposed G3).
+> (`docs/specs/2026-07-22-feed-health.md`, proposed G3).
 
 Position pings per 10-minute bucket for a suspect window, against the same
 buckets one day earlier — run when a day shows an unexplained VANISHED spike,

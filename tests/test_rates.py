@@ -1,7 +1,7 @@
 """Wilson score intervals: hand-computed values, edge cases, and invariants.
 
 Every expected number in this file was computed from the formula in
-docs/superpowers/specs/2026-07-19-publisher-design.md:
+docs/specs/2026-07-19-publisher.md:
 
     p      = k / n
     denom  = 1 + z**2 / n

@@ -1150,23 +1150,34 @@ cd /opt/ghost-bus && git pull
 `classify_day` upserts by `(trip_id, service_date)` and observations are
 never deleted, so reclassification is just re-running the classifier over
 every burn-in date. Run it once, immediately after the deploy, so the
-published series never mixes pre- and post-G2 verdicts:
+published series never mixes pre- and post-G2 verdicts.
+
+**Source the environment file first — this bit its own author.** The
+systemd units get `GHOSTBUS_AGENCIES` from `EnvironmentFile=`; a manual
+shell does not, so without sourcing, `read_agency_names()` silently falls
+back to the default `"Dublin Bus"` — which matches NOTHING on this feed
+(the agency is `"Bus Átha Cliath – Dublin Bus"`), and the run quietly
+reclassifies only Go-Ahead, leaving the fleet's majority on the old
+methodology. The assert below turns that silent miss into a loud stop:
 
 ```bash
-cd /opt/ghost-bus && .venv/bin/python - <<PY
+cd /opt/ghost-bus && set -a && . <(sudo cat /etc/ghostbus.env) && set +a && \
+.venv/bin/python - <<PY
 import datetime as dt
 from classify.run_classifier import run_for_dates
 from classify.store import init_store
 from ghostbus_config import get_db, read_agency_names, read_match_radius_m
 
+names = read_agency_names()
+assert any("tha Cliath" in n for n in names), f"agency env not loaded: {names}"
 db = get_db(); init_store(db)
 start = dt.date(2026, 7, 18)          # first burn-in service date
 end = dt.date.today()
 dates = [start + dt.timedelta(days=i) for i in range((end - start).days + 1)]
-summary = run_for_dates(db, dates, read_agency_names(),
+summary = run_for_dates(db, dates, names,
                         dt.datetime.now(dt.timezone.utc), read_match_radius_m())
-for day, counts in summary.items():
-    print(day, counts)
+for day, counts in sorted(summary.items()):
+    print(day, dict(sorted(counts.items())))
 PY
 ```
 

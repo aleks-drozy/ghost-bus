@@ -344,6 +344,21 @@ def test_g2_future_vehicle_ts_never_extends_credit(db):
     assert classify_trip(db, trip) == "VANISHED"
 
 
+def test_g2_malformed_vehicle_ts_crashes_loudly(db):
+    # The poller pins vehicle_ts to ISO-or-NULL at ingest, so a string that
+    # does not parse means database corruption. The classifier must crash
+    # rather than silently fall back to fetch time - a quiet fallback would
+    # reshape outcomes without anyone knowing the data was bad (same rule as
+    # the geo query's corruption handling).
+    trip = make_trip(n_stops=5)
+    beat_window(db, trip)
+    record_observation(db, trip.trip_id, str(DAY),
+                       (trip.start_utc + dt.timedelta(minutes=10)).isoformat(),
+                       "position", 1, vehicle_ts="not-a-timestamp")
+    with pytest.raises(ValueError):
+        classify_trip(db, trip)
+
+
 def test_g2_residual_benefit_of_doubt_survives(db):
     # Progress 4/5 = 0.8 sits in [0.75, 0.90): neither clearly completed nor
     # clearly vanished. Even though the near-end pings are stale

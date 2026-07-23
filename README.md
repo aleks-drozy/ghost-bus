@@ -6,7 +6,8 @@
 
 ## What this is
 
-A pipeline that polls TFI's GTFS-Realtime feed once a minute, matches every
+A pipeline that polls TFI's GTFS-Realtime feed once a minute (alternating
+its two endpoints, so each is sampled every two minutes), matches every
 observation against the published GTFS timetable, and classifies each
 scheduled Dublin Bus / Go-Ahead Ireland trip into exactly one outcome — then
 publishes a public scoreboard and an open dataset from the result. No

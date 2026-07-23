@@ -34,6 +34,24 @@ def test_daily_columns_match_the_spec_verbatim():
         "untracked_rate", "untracked_lo", "untracked_hi")
 
 
+def test_days_before_the_first_heartbeat_are_not_complete_service_days():
+    # Found at first live publish: the classifier back-fills "yesterday" on
+    # its first-ever run, writing a full day of EXCLUDED verdicts for a
+    # service day the tracker did not exist on - and coverage then claimed
+    # that day as a "complete service day", while the uptime record
+    # (correctly) started at the first heartbeat. A day we never watched is
+    # not part of the record: coverage and uptime must share a first day.
+    db = build_db(service_dates=("2026-03-22", "2026-03-23"))
+    # build_db's heartbeats start on 2026-03-23; 03-22 predates every beat.
+    days = complete_service_days(db, dt.date(2026, 3, 24))
+    assert days == ["2026-03-23"]
+
+
+def test_no_heartbeats_at_all_means_no_complete_days():
+    db = build_db(service_dates=("2026-03-23",), heartbeats=[])
+    assert complete_service_days(db, dt.date(2026, 3, 24)) == []
+
+
 def test_excluded_feed_count_is_published_and_out_of_the_denominator():
     db = build_db()
     db.executemany("INSERT INTO trip_outcomes VALUES (?,?,?,?,?)", [

@@ -11,7 +11,7 @@ import datetime as dt
 import publish.dataset as dataset
 from publish.dataset import (WITHDRAWN_DAYS, complete_service_days,
                              write_dataset)
-from tests.dataset_fixture import build_db, consecutive_dates
+from tests.dataset_fixture import beats_from, build_db, consecutive_dates
 
 UTC = dt.timezone.utc
 
@@ -34,7 +34,7 @@ def test_2026_07_21_is_withdrawn_with_a_feed_reason():
 
 def test_withdrawn_day_leaves_complete_service_days(monkeypatch):
     days = consecutive_dates(3)
-    db = build_db(days)
+    db = build_db(days, heartbeats=beats_from(days[0]))
     monkeypatch.setattr(dataset, "WITHDRAWN_DAYS", {days[1]: "test reason"})
     today = dt.date.fromisoformat(days[-1]) + dt.timedelta(days=1)
     assert complete_service_days(db, today) == [days[0], days[2]]

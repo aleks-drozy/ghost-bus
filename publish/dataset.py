@@ -196,11 +196,25 @@ def complete_service_days(db: sqlite3.Connection, today: dt.date) -> list[str]:
     partial day understates trip counts and distorts every rate built on it.
     Withdrawn days (module constant above) are removed here, at the single
     source every publish decision reads, so they publish nothing and count
-    for nothing downstream."""
+    for nothing downstream.
+
+    Days before the tracker's first heartbeat are removed too: the
+    classifier's first-ever run back-fills "yesterday", writing a full day
+    of EXCLUDED verdicts for a service day the tracker did not exist on.
+    Counting that day made coverage claim a first day the uptime record
+    (which starts at the first heartbeat, see uptime_days) denies - two
+    public artifacts disagreeing about when the record began. A day we
+    never watched is not part of the record; with no heartbeats at all
+    there is no record yet.
+    """
+    row = db.execute("SELECT MIN(ts_utc) FROM heartbeats").fetchone()
+    if row is None or row[0] is None:
+        return []
+    first = dt.datetime.fromisoformat(row[0]).astimezone(ZoneInfo(LOCAL_TZ)).date().isoformat()
     return [d for (d,) in db.execute(
         "SELECT DISTINCT service_date FROM trip_outcomes "
         "WHERE service_date < ? ORDER BY service_date", (today.isoformat(),))
-        if d not in WITHDRAWN_DAYS]
+        if d not in WITHDRAWN_DAYS and d >= first]
 
 
 def _daily_row(r: dict, names: dict) -> dict:

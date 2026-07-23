@@ -84,6 +84,19 @@ def consecutive_dates(n: int, start: str = "2026-03-02") -> list[str]:
     return [(d0 + dt.timedelta(days=i)).isoformat() for i in range(n)]
 
 
+def beats_from(day: str) -> list[tuple]:
+    """Default heartbeats plus one ok beat at the start of `day`.
+
+    complete_service_days drops service days before the first heartbeat (a
+    day the tracker never watched is not part of the record), so multi-day
+    tests whose service days start before the fixture's 2026-03-23
+    heartbeats must state explicitly that tracking existed from their first
+    day. Explicit at the call site, not automatic in build_db - the
+    first-heartbeat rule itself needs tests where days DO predate the
+    beats."""
+    return [(f"{day}T00:00:00+00:00", 1)] + HEARTBEATS
+
+
 def build_db(service_dates=(SERVICE_DATE,), heartbeats=None) -> sqlite3.Connection:
     db = sqlite3.connect(":memory:")
     db.executescript(_SCHEMA)

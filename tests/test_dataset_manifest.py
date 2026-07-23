@@ -6,7 +6,7 @@ import publish.dataset as dataset
 from publish.dataset import (BASELINE_REQUIRED_DAYS, build_manifest,
                              published_slugs, route_names, write_dataset)
 from tests.dataset_fixture import (GTFS_HASH, GTFS_LOADED_AT, SERVICE_DATE,
-                                   build_db, consecutive_dates)
+                                   beats_from, build_db, consecutive_dates)
 
 UTC = dt.timezone.utc
 FIXED_NOW = dt.datetime(2026, 3, 24, 4, 15, 0, tzinfo=UTC)
@@ -69,7 +69,7 @@ def test_manifest_file_is_pretty_printed_and_newline_terminated(tmp_path):
 
 def test_thirteen_complete_days_publish_no_route_csvs(tmp_path):
     days = consecutive_dates(13)          # 2026-03-02 .. 2026-03-14
-    db = build_db(service_dates=days)
+    db = build_db(service_dates=days, heartbeats=beats_from(days[0]))
     write_dataset(db, tmp_path, today=dt.date(2026, 3, 15), now_utc=FIXED_NOW)
     manifest = read_manifest(tmp_path)
     assert manifest["coverage"]["complete_days"] == 13
@@ -79,7 +79,7 @@ def test_thirteen_complete_days_publish_no_route_csvs(tmp_path):
 
 def test_fourteen_complete_days_flip_the_scoreboard_on(tmp_path):
     days = consecutive_dates(14)          # 2026-03-02 .. 2026-03-15
-    db = build_db(service_dates=days)
+    db = build_db(service_dates=days, heartbeats=beats_from(days[0]))
     write_dataset(db, tmp_path, today=dt.date(2026, 3, 16), now_utc=FIXED_NOW)
     manifest = read_manifest(tmp_path)
     assert manifest["coverage"] == {"first_day": "2026-03-02",
@@ -98,10 +98,10 @@ def test_falling_below_the_baseline_withdraws_published_route_csvs(tmp_path):
     below the threshold, route data must be withdrawn, not left standing beside
     a page that says we publish nothing about any route.
     """
-    write_dataset(build_db(service_dates=consecutive_dates(14)), tmp_path,
+    write_dataset(build_db(service_dates=consecutive_dates(14), heartbeats=beats_from('2026-03-02')), tmp_path,
                   today=dt.date(2026, 3, 16), now_utc=FIXED_NOW)
     assert list((tmp_path / "daily").iterdir())
-    write_dataset(build_db(service_dates=consecutive_dates(13)), tmp_path,
+    write_dataset(build_db(service_dates=consecutive_dates(13), heartbeats=beats_from('2026-03-02')), tmp_path,
                   today=dt.date(2026, 3, 15), now_utc=FIXED_NOW)
     assert not (tmp_path / "daily").exists()
     assert read_manifest(tmp_path)["scoreboard_ready"] is False
@@ -117,13 +117,13 @@ def test_orphaned_daily_csvs_are_pruned_when_coverage_drops_partially(tmp_path):
     (2026-03-02 to 2026-03-16, 15 days).
     """
     days20 = consecutive_dates(20)                       # 2026-03-02..2026-03-21
-    write_dataset(build_db(service_dates=days20), tmp_path,
+    write_dataset(build_db(service_dates=days20, heartbeats=beats_from(days20[0])), tmp_path,
                   today=dt.date(2026, 3, 22), now_utc=FIXED_NOW)
     assert sorted(p.name for p in (tmp_path / "daily").iterdir()) == \
         [f"{d}.csv" for d in days20]
 
     days15 = days20[:15]                                  # 2026-03-02..2026-03-16
-    write_dataset(build_db(service_dates=days15), tmp_path,
+    write_dataset(build_db(service_dates=days15, heartbeats=beats_from(days15[0])), tmp_path,
                   today=dt.date(2026, 3, 17), now_utc=FIXED_NOW)
     manifest = read_manifest(tmp_path)
     assert manifest["coverage"] == {"first_day": days15[0], "last_day": days15[-1],
@@ -191,9 +191,9 @@ def test_a_retired_routes_slug_is_carried_forward_and_never_reassigned():
 def test_the_published_slug_map_is_stable_across_two_publishes(tmp_path):
     """Second publish reads the first one's manifest back off disk."""
     expected = {"03C 120 e a": "03c-120-e-a", "R1": "r1", "R2": "r2"}
-    first = write_dataset(build_db(service_dates=consecutive_dates(14)), tmp_path,
+    first = write_dataset(build_db(service_dates=consecutive_dates(14), heartbeats=beats_from('2026-03-02')), tmp_path,
                           today=dt.date(2026, 3, 16), now_utc=FIXED_NOW)
-    second = write_dataset(build_db(service_dates=consecutive_dates(14)), tmp_path,
+    second = write_dataset(build_db(service_dates=consecutive_dates(14), heartbeats=beats_from('2026-03-02')), tmp_path,
                            today=dt.date(2026, 3, 16), now_utc=FIXED_NOW)
     assert first["route_slugs"] == expected
     assert second["route_slugs"] == expected

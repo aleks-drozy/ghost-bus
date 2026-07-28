@@ -235,21 +235,25 @@ ghost-bus/
 
 ## The scoreboard & open data
 
-**Nothing here is live yet.** GitHub Pages is not enabled on this repo and
-the `ghost-bus-data` repository does not exist. What follows is what this
-pipeline will publish, and under what conditions — not a description of a
-site you can visit today. `ops/RUNBOOK.md` §8 is the one-time setup
-(create the data repo, enable Pages, mint a scoped token) that turns it on.
+**Live since 2026-07-22.** GitHub Pages is enabled and the `ghost-bus-data`
+repository is public. `ops/RUNBOOK.md` §8 covers the one-time setup this
+was built from (create the data repo, enable Pages, mint a scoped token),
+kept here for reference.
 
-Once enabled, the scoreboard will be built in CI *from the published CSVs*,
-never from the database, so a number on the page could not disagree with
-the downloadable data — there would be only one source for both. The
-dataset will live in its own repository, written by a credential that can
-reach nothing else, so the machine that produces the numbers cannot also
-produce the page.
+**Currently paused, not stopped:** the production VM's cloud account was
+suspended by its provider on 2026-07-23 (unrelated to this project's code
+or data), so collection is frozen at day 4 of the 14-day baseline until
+that's resolved. Every day already published (`07-18`→`07-22`) is safe and
+final regardless of outcome; nothing already public is affected.
 
-**Site (once enabled):** https://aleks-drozy.github.io/ghost-bus/
-**Data (once created):** https://github.com/aleks-drozy/ghost-bus-data
+The scoreboard is built in CI *from the published CSVs*, never from the
+database, so a number on the page cannot disagree with the downloadable
+data — there is only one source for both. The dataset lives in its own
+repository, written by a credential that can reach nothing else, so the
+machine that produces the numbers cannot also produce the page.
+
+**Site:** https://aleks-drozy.github.io/ghost-bus/
+**Data:** https://github.com/aleks-drozy/ghost-bus-data
 
 | Path in the data repo | What it will hold |
 |---|---|

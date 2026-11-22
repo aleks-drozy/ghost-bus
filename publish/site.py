@@ -412,19 +412,18 @@ def render_index(site_dir, manifest: dict, daily_rows: list[dict],
         baseline_notice = ""
         board = render_board(ranked, unranked, slugs)
     else:
-        window_line = "No route numbers are published yet."
+        window_line = "No route numbers were published."
         baseline_notice = (
             '<section class="baseline">'
-            f"<h2>Collecting baseline — day {esc(complete)} of {esc(required)}</h2>"
-            "<p>We publish nothing about any route until we have at least "
+            f"<h2>Baseline collection stopped at day {esc(complete)} of {esc(required)}</h2>"
+            "<p>We published nothing about any route because the tracker never reached "
             f"{esc(required)} complete days of tracking. Ranking routes on a few days of "
-            "data would be an accusation the data cannot support, so the table stays "
-            "empty until the baseline exists. Our own uptime is published from day one: "
+            "data would be an accusation the data cannot support, so the table stayed "
+            "empty. Our own uptime was published from day one: "
             "it is our reliability, not anyone else's, and you should be able to check "
             "how much we were actually watching.</p>"
-            '<p class="note"><a href="methodology.html">Read the methodology in the '
-            "meantime</a> — it is complete, and it will not change quietly once "
-            "numbers appear.</p>"
+            '<p class="note"><a href="methodology.html">Read the methodology</a>: '
+            "it is complete.</p>"
             "</section>"
         )
         board = ""

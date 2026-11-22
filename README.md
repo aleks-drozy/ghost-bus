@@ -1,19 +1,26 @@
 # Ghost Bus Tracker
 
-**Which Dublin buses actually show up? A 24/7 tracker that measures ghost buses. Honestly.**
+> **Status: offline since 2026-07-23.** This tracker ran from 2026-07-18 to
+> 2026-07-23 and stopped because the Oracle Cloud account hosting it was
+> terminated in July 2026. The last published data covers 2026-07-22: 4
+> complete service days of the 14-day baseline, so no route numbers were ever
+> published. The code, tests, methodology and dataset are kept as a record of
+> what ran. The scoreboard site is a frozen snapshot, not a live feed.
+
+**Which Dublin buses actually show up? A tracker that measured ghost buses around the clock in July 2026. Honestly.**
 
 [![tests](https://github.com/aleks-drozy/ghost-bus/actions/workflows/tests.yml/badge.svg)](https://github.com/aleks-drozy/ghost-bus/actions/workflows/tests.yml)
 
 ## What this is
 
-A pipeline that polls TFI's GTFS-Realtime feed once a minute (alternating
-its two endpoints, so each is sampled every two minutes), matches every
-observation against the published GTFS timetable, and classifies each
+A pipeline that polled TFI's GTFS-Realtime feed once a minute (alternating
+its two endpoints, so each was sampled every two minutes), matched every
+observation against the published GTFS timetable, and classified each
 scheduled Dublin Bus / Go-Ahead Ireland trip into exactly one outcome, then
-publishes a public scoreboard and an open dataset from the result. No
+published a public scoreboard and an open dataset from the result. No
 scraping: official API and open data only.
 
-We are publicly grading a state service, so our own measurement has to be
+We were publicly grading a state service, so our own measurement had to be
 beyond reproach. The methodology below, and the tracker's own uptime
 self-report, are not an appendix: they're the point.
 
@@ -177,15 +184,12 @@ and publish gate are all implemented and covered by the test suite (no
 network, runs in CI on every push: the badge above is the live count;
 a number written here would only go stale).
 
-**Live since 2026-07-18, paused since 2026-07-23.** The pipeline was
+**Ran from 2026-07-18 to 2026-07-23, offline since.** The pipeline was
 deployed to the production VM on 2026-07-18; `ops/RUNBOOK.md` is the
 complete, copy-pasteable provisioning-through-recovery guide it followed.
-On 2026-07-23 the VM's cloud account was suspended by its provider
-(unrelated to this project's code or data). An appeal has been filed, but
-the provider gives no reference ticket, no SLA, and no notification if the
-appeal is denied, so there is no way to know when, or whether, collection
-resumes. Nothing about the pipeline's logic changes once it does: only that
-it starts seeing the live feed again instead of sitting idle.
+On 2026-07-23 collection stopped: the Oracle Cloud account hosting the VM
+was terminated in July 2026 (unrelated to this project's code or data). The
+pipeline has not run since.
 
 ## Known limitations (v1 core, before live burn-in)
 
@@ -243,16 +247,16 @@ ghost-bus/
 
 ## The scoreboard & open data
 
-**Live since 2026-07-22.** GitHub Pages is enabled and the `ghost-bus-data`
-repository is public. `ops/RUNBOOK.md` §8 covers the one-time setup this
+**First published 2026-07-22, now a frozen snapshot.** GitHub Pages is
+enabled and the `ghost-bus-data` repository is public. `ops/RUNBOOK.md` §8 covers the one-time setup this
 was built from (create the data repo, enable Pages, mint a scoped token),
 kept here for reference.
 
-**Currently paused, not stopped:** the production VM's cloud account was
-suspended by its provider on 2026-07-23 (unrelated to this project's code
-or data), so collection is frozen at day 4 of the 14-day baseline until
-that's resolved. Every day already published (`07-18`→`07-22`) is safe and
-final regardless of outcome; nothing already public is affected.
+**Offline since 2026-07-23:** the Oracle Cloud account hosting the
+production VM was terminated in July 2026 (unrelated to this project's code
+or data), so collection stopped at day 4 of the 14-day baseline. Every day
+already published (`07-18`→`07-22`) is safe and final; nothing already
+public is affected.
 
 The scoreboard is built in CI *from the published CSVs*, never from the
 database, so a number on the page cannot disagree with the downloadable

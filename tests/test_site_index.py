@@ -80,7 +80,7 @@ def test_pre_baseline_mode_emits_no_route_table():
                                         "last_day": "2026-06-09",
                                         "complete_days": 9}})
     assert "<table" not in html
-    assert "collecting baseline" in html.lower()
+    assert "baseline collection stopped" in html.lower()
     assert "day 9 of 14" in html
     assert "uptime-strip" in html
 
